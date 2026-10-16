@@ -1,0 +1,20 @@
+# Fine riga: i file Delphi restano CRLF, il resto lo decide git
+* text=auto
+
+*.pas        text eol=crlf
+*.dpr        text eol=crlf
+*.dpk        text eol=crlf
+*.dproj      text eol=crlf
+*.groupproj  text eol=crlf
+*.inc        text eol=crlf
+*.md         text
+*.txt        text
+*.py         text eol=lf
+
+# Dati di prova: mai convertire
+*.DBF binary
+*.DBT binary
+*.DB  binary
+*.MB  binary
+*.PX  binary
+*.MDX binary

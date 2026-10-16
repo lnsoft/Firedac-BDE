@@ -1,0 +1,40 @@
+# Delphi
+__history/
+__recovery/
+*.~*
+*.dcu
+*.bpl
+*.dcp
+*.rsm
+*.map
+*.tds
+*.drc
+*.stat
+*.local
+*.identcache
+*.dsk
+*.tvsconfig
+*.res
+*.exe
+*.dll
+Dcu/
+Exe/
+Win32/
+Win64/
+Debug/
+Release/
+
+# file locali del BDE / Paradox creati durante i test
+PDOXUSRS.NET
+PARADOX.LCK
+*.LCK
+_QSQL*.*
+
+# dati di prova generati: tenere solo i sample sintetici (SAMPLE.*)
+Demos/Data/*
+!Demos/Data/SAMPLE.DBF
+!Demos/Data/SAMPLE.DBT
+!Demos/Data/.gitkeep
+
+# non ridistribuire file Embarcadero
+FireDAC.inc

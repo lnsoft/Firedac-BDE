@@ -1,0 +1,60 @@
+﻿<Project xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+    <PropertyGroup>
+        <ProjectGuid>{324A04E5-278F-4C30-A39E-2496DBC5F9AC}</ProjectGuid>
+    </PropertyGroup>
+    <ItemGroup>
+        <Projects Include="Packages\d132\FDBDERun.dproj">
+            <Dependencies/>
+        </Projects>
+        <Projects Include="Packages\d132\FDBDEDesign.dproj">
+            <Dependencies/>
+        </Projects>
+        <Projects Include="Demos\BDETest.dproj">
+            <Dependencies/>
+        </Projects>
+    </ItemGroup>
+    <ProjectExtensions>
+        <Borland.Personality>Default.Personality.12</Borland.Personality>
+        <Borland.ProjectType/>
+        <BorlandProject>
+            <Default.Personality/>
+        </BorlandProject>
+    </ProjectExtensions>
+    <Target Name="FDBDERun">
+        <MSBuild Projects="Packages\d132\FDBDERun.dproj"/>
+    </Target>
+    <Target Name="FDBDERun:Clean">
+        <MSBuild Projects="Packages\d132\FDBDERun.dproj" Targets="Clean"/>
+    </Target>
+    <Target Name="FDBDERun:Make">
+        <MSBuild Projects="Packages\d132\FDBDERun.dproj" Targets="Make"/>
+    </Target>
+    <Target Name="FDBDEDesign">
+        <MSBuild Projects="Packages\d132\FDBDEDesign.dproj"/>
+    </Target>
+    <Target Name="FDBDEDesign:Clean">
+        <MSBuild Projects="Packages\d132\FDBDEDesign.dproj" Targets="Clean"/>
+    </Target>
+    <Target Name="FDBDEDesign:Make">
+        <MSBuild Projects="Packages\d132\FDBDEDesign.dproj" Targets="Make"/>
+    </Target>
+    <Target Name="BDETest">
+        <MSBuild Projects="Demos\BDETest.dproj"/>
+    </Target>
+    <Target Name="BDETest:Clean">
+        <MSBuild Projects="Demos\BDETest.dproj" Targets="Clean"/>
+    </Target>
+    <Target Name="BDETest:Make">
+        <MSBuild Projects="Demos\BDETest.dproj" Targets="Make"/>
+    </Target>
+    <Target Name="Build">
+        <CallTarget Targets="FDBDERun;FDBDEDesign;BDETest"/>
+    </Target>
+    <Target Name="Clean">
+        <CallTarget Targets="FDBDERun:Clean;FDBDEDesign:Clean;BDETest:Clean"/>
+    </Target>
+    <Target Name="Make">
+        <CallTarget Targets="FDBDERun:Make;FDBDEDesign:Make;BDETest:Make"/>
+    </Target>
+    <Import Project="$(BDS)\Bin\CodeGear.Group.Targets" Condition="Exists('$(BDS)\Bin\CodeGear.Group.Targets')"/>
+</Project>
