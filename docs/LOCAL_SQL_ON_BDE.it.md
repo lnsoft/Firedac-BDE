@@ -87,9 +87,53 @@ LocalSQL.Active := True;
 | Auto-join su un campo non unico | 16,7 milioni di coppie in 2,1 s |
 | `WHERE` selettivo sulla tabella principale + join | circa 10 ms |
 
-I tempi dell'auto-join sono troppo bassi per una scansione completa della tabella interna a ogni
-riga esterna, quindi la ricerca nel join sembra efficiente; è un'inferenza dai tempi, non una
-garanzia documentata. Un `WHERE` sulla tabella principale costa circa una scansione completa di essa.
+Una query costa circa **un passaggio sulla sorgente più grande**, qualunque cosa selezioni il `WHERE` (vedi
+le misure su tabelle grandi più sotto): la tabella virtuale non riceve né filtri né ricerche su indice. Il Local SQL è quindi
+adatto a report e analisi su intere tabelle, non a leggere le poche righe di un singolo documento.
+
+## Scelta della sorgente: `TFDQuery` sul driver o `TTable` del BDE
+
+`OnGetDataSet` può restituire un `TFDQuery` sulla connessione `BDE` (come sopra) oppure un semplice
+`TTable` del BDE (`DatabaseName` = cartella o alias, `TableName` = `"TAB.DBF"`). `LocalSQLTest ... ttable`
+li confronta.
+
+| Stessi dati, stessa macchina | `TFDQuery` sul driver | `TTable` del BDE |
+|---|---|---|
+| Apertura tabella Paradox da 13.898 righe | 21 ms | 15 ms |
+| Apertura tabella dBase da 3.590 righe e 119 campi | 234 ms | 2 ms |
+| `count(*)` della tabella da 13.898 righe | 13 ms | 191 ms |
+| Join delle due tabelle (3.385 righe) | 189 ms | 541 ms |
+| `WHERE` selettivo + join | 10 ms | 365 ms |
+| 20 giri di join + vista | 409 ms | 14.400 ms |
+
+Una `TQuery` paga all'apertura un costo che cresce con la quantità di dati (il BDE costruisce il
+risultato), poi le query girano sul dataset tenuto in memoria. Un `TTable` si apre subito, ma la
+tabella virtuale non riceve alcun filtro, quindi ogni query scorre tutta la tabella con la navigazione
+del BDE (circa 26 µs per riga qui, anche se il `WHERE` non trova nulla). La spiegazione deriva dai tempi,
+non dal codice di FireDAC.
+
+Regola pratica: `TTable` per query singole su tabelle grandi o larghe; `TFDQuery` quando le stesse
+tabelle sono interrogate più volte; per tabelle molto grandi riduci prima i dati dentro il BDE (una
+query sorgente con `WHERE` su indice, non ancora provato) e usa il Local SQL per combinare gli insiemi ridotti.
+
+### Tabelle master-detail grandi (22.323 testate, 452.873 righe, dBase IV)
+
+| | `TFDQuery` sul driver | `TTable` del BDE |
+|---|---|---|
+| Apertura testate / righe | 908 ms / 3.430 ms | 17 ms / 1 ms |
+| Join di tutte le righe (449.991) | 764 ms (BDE nativo: 1.968 ms) | 6.952 ms |
+| Join per un solo documento (3 righe) | 456 ms (BDE nativo: 992 ms) | 6.685 ms |
+| 20 giri di join + vista | 18 s | 268 s |
+| Modifiche di altri utenti visibili | no (istantanea) | sì (dati vivi) |
+
+Aprire la tabella delle righe con una `TQuery` costa 3,4 s; un `TTable` si apre subito. Come sorgente del
+Local SQL, però, il `TTable` costa circa 6,7 s per query su questa tabella (un passaggio su 452.873 righe
+con la navigazione del BDE). Lo stesso join per un solo documento richiede 992 ms nel Local SQL del BDE, quindi nemmeno il BDE usa
+una ricerca su indice. Un semplice `select * from DocD00 where NUMERO = :k` attraverso il driver restituisce le 3 righe di un documento in 8 ms
+(BDE nativo: 4 ms): per un WHERE semplice il BDE usa l'indice; solo l'apertura dell'intera tabella e i join costano un passaggio completo.
+Per l'accesso a un singolo documento usa un percorso indicizzato (`TFDTable` con
+`MasterSource`/`MasterFields`, oppure un `WHERE` su campo indicizzato dentro il BDE) e tieni il Local SQL per i
+report su intere tabelle.
 
 ## Non ancora provato
 
