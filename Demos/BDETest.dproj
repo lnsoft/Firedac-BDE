@@ -70,8 +70,8 @@
     </PropertyGroup>
     <PropertyGroup Condition="'$(Cfg_2_Win32)'!=''">
         <Debugger_RunParams>Data SAMPLE.DBF ID NAME NOTES</Debugger_RunParams>
-        <DCC_DcuOutput>..\Dcu\$(Config)\$(Platform)</DCC_DcuOutput>
-        <DCC_ExeOutput>..\Exe\$(Config)</DCC_ExeOutput>
+        <DCC_DcuOutput>..\Dcu\13_2\$(Platform)\$(Config)</DCC_DcuOutput>
+        <DCC_ExeOutput>..\Exe\$(Platform)</DCC_ExeOutput>
         <DCC_UnitSearchPath>..\Source;$(DCC_UnitSearchPath)</DCC_UnitSearchPath>
         <VerInfo_Locale>1033</VerInfo_Locale>
         <VerInfo_Keys>CompanyName=;FileDescription=$(MSBuildProjectName);FileVersion=1.0.0.0;InternalName=;LegalCopyright=;LegalTrademarks=;OriginalFilename=;ProgramID=com.embarcadero.$(MSBuildProjectName);ProductName=$(MSBuildProjectName);ProductVersion=1.0.0.0;Comments=</VerInfo_Keys>
@@ -82,8 +82,9 @@
         <DelphiCompile Include="$(MainSource)">
             <MainSource>MainSource</MainSource>
         </DelphiCompile>
-        <DCCReference Include="..\Source\FireDAC.Phys.BDE.pas"/>
         <DCCReference Include="..\Source\FireDAC.Phys.BDEDef.pas"/>
+        <DCCReference Include="..\Source\FireDAC.Phys.BDEMeta.pas"/>
+        <DCCReference Include="..\Source\FireDAC.Phys.BDE.pas"/>
         <BuildConfiguration Include="Base">
             <Key>Base</Key>
         </BuildConfiguration>

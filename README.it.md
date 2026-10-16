@@ -49,6 +49,11 @@ vecchi programmi continuano a girare, senza infrastrutture ibride.
 4. Nei tuoi progetti aggiungi `FDBDERun` ai package runtime, oppure inserisci
    `FireDAC.Phys.BDEDef` e `FireDAC.Phys.BDE` in uno `uses`: il driver si registra da solo.
 
+Da riga di comando (Windows, Delphi 13): `build.bat [Debug|Release]` compila i package e `BDETest`;
+`test.bat` esegue `BDETest` su una copia dei dati di prova sintetici; `install-ide.bat` registra il
+package design-time nell'IDE (chiudi prima RAD Studio); `clean.bat` rimuove i file generati.
+Altre versioni di Delphi: `set BDSVER=<n>` oppure `set RSVARS=<percorso di rsvars.bat>`.
+
 Se il compilatore non trova `FireDAC.inc`, aggiungi `$(BDS)\source\data\firedac` al
 percorso di ricerca (non copiare il file nel repository: è di Embarcadero).
 

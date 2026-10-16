@@ -53,6 +53,11 @@ specific to a database.
    `FireDAC.Phys.BDEDef` and `FireDAC.Phys.BDE` to a `uses` clause: the driver
    registers itself in the `initialization` section.
 
+Command line (Windows, Delphi 13): `build.bat [Debug|Release]` builds the packages and
+`BDETest`; `test.bat` runs `BDETest` on a copy of the synthetic sample data;
+`install-ide.bat` registers the design-time package in the IDE (close RAD Studio first);
+`clean.bat` removes generated files. Other Delphi versions: `set BDSVER=<n>` or `set RSVARS=<path to rsvars.bat>`.
+
 If the compiler cannot find `FireDAC.inc`, add `$(BDS)\source\data\firedac` to
 the library/search path (do **not** copy that file into the repository, it belongs to Embarcadero).
 

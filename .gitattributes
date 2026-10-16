@@ -18,3 +18,4 @@
 *.MB  binary
 *.PX  binary
 *.MDX binary
+*.bat        text eol=crlf
