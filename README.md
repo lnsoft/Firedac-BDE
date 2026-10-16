@@ -95,8 +95,9 @@ FDQuery1.Post;
 ## Things to know (limitations)
 
 - **Windows 32-bit only.** The BDE does not exist for 64-bit.
-- **SQL dialect = BDE Local SQL**: no `LIMIT/TOP`, limited functions, limited joins/subqueries.
-  FireDAC does skip/limit on the client side.
+- **SQL dialect = BDE Local SQL**: no `LIMIT/TOP`, `CASE`, `COALESCE`, `CURRENT_DATE`, `LENGTH`,
+  few functions, limited joins/subqueries; `LIKE` is case-sensitive; use parameters for dates.
+  FireDAC does skip/limit on the client side. See [docs/LOCAL_SQL.md](docs/LOCAL_SQL.md).
 - **File extensions.** A folder can hold `CLIENTS.DB` and `CLIENTS.DBF`. Always use the
   extension and double quotes in SQL (`"CLIENTS.DBF"`); without it the BDE picks Paradox.
 - **DBF has no primary key.** Set `UpdateOptions.KeyFields` to a field that is really unique,
