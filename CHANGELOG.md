@@ -15,6 +15,8 @@ First public release.
 - Local SQL: official reserved-word list; escape functions `UCASE/LCASE/LTRIM/RTRIM/SUBSTRING/CONCAT`,
   `CONVERT` (maps `INT`, `DATETIME`, `CHAR`) and `YEAR/MONTH/DAYOFMONTH/HOUR/MINUTE/SECOND` (via `EXTRACT`).
 - Documentation: README (EN/IT), `docs/ARCHITECTURE.md`, `docs/LOCAL_SQL.md` / `LOCAL_SQL.it.md`.
+- Experimental: FireDAC Local SQL (SQLite virtual tables) on top of the driver; `docs/LOCAL_SQL_ON_BDE.md` (EN/IT)
+  and `Demos\LocalSQLTest.dpr`.
 - Known limit documented: rollback of a previously empty memo (dBase III).
 - Design-time and runtime packages for Delphi 13.2; command line scripts `build.bat`, `test.bat`,
   `clean.bat`, `install-ide.bat`; `BDETest` console test program; synthetic sample data generators.

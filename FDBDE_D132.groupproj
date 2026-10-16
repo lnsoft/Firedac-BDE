@@ -12,6 +12,9 @@
         <Projects Include="Demos\BDETest.dproj">
             <Dependencies/>
         </Projects>
+        <Projects Include="Demos\LocalSQLTest.dproj">
+            <Dependencies/>
+        </Projects>
     </ItemGroup>
     <ProjectExtensions>
         <Borland.Personality>Default.Personality.12</Borland.Personality>
@@ -47,14 +50,23 @@
     <Target Name="BDETest:Make">
         <MSBuild Projects="Demos\BDETest.dproj" Targets="Make"/>
     </Target>
+    <Target Name="LocalSQLTest">
+        <MSBuild Projects="Demos\LocalSQLTest.dproj"/>
+    </Target>
+    <Target Name="LocalSQLTest:Clean">
+        <MSBuild Projects="Demos\LocalSQLTest.dproj" Targets="Clean"/>
+    </Target>
+    <Target Name="LocalSQLTest:Make">
+        <MSBuild Projects="Demos\LocalSQLTest.dproj" Targets="Make"/>
+    </Target>
     <Target Name="Build">
-        <CallTarget Targets="FDBDERun;FDBDEDesign;BDETest"/>
+        <CallTarget Targets="FDBDERun;FDBDEDesign;BDETest;LocalSQLTest"/>
     </Target>
     <Target Name="Clean">
-        <CallTarget Targets="FDBDERun:Clean;FDBDEDesign:Clean;BDETest:Clean"/>
+        <CallTarget Targets="FDBDERun:Clean;FDBDEDesign:Clean;BDETest:Clean;LocalSQLTest:Clean"/>
     </Target>
     <Target Name="Make">
-        <CallTarget Targets="FDBDERun:Make;FDBDEDesign:Make;BDETest:Make"/>
+        <CallTarget Targets="FDBDERun:Make;FDBDEDesign:Make;BDETest:Make;LocalSQLTest:Make"/>
     </Target>
     <Import Project="$(BDS)\Bin\CodeGear.Group.Targets" Condition="Exists('$(BDS)\Bin\CodeGear.Group.Targets')"/>
 </Project>

@@ -6,6 +6,7 @@ rem
 rem Risultato:
 rem   Dcu\13_2\Win32\<Config>\          unit compilate (tutti i progetti)
 rem   Exe\Win32\BDETest.exe             programma di test
+rem   Exe\Win32\LocalSQLTest.exe        esperimento Local SQL sopra il driver
 rem   FDBDERun.bpl / FDBDEDesign.bpl    nella cartella Bpl di RAD Studio
 rem                                     (%BDSCOMMONDIR%\Bpl)
 rem
@@ -43,6 +44,11 @@ if errorlevel 1 goto :fail
 echo.
 echo === BDETest [%CFG%, Win32] ===
 msbuild "Demos\BDETest.dproj" %COMMON% "/p:DCC_DcuOutput=%DCUDIR%" "/p:DCC_ExeOutput=%EXEDIR%"
+if errorlevel 1 goto :fail
+
+echo.
+echo === LocalSQLTest [%CFG%, Win32] ===
+msbuild "Demos\LocalSQLTest.dproj" %COMMON% "/p:DCC_DcuOutput=%DCUDIR%" "/p:DCC_ExeOutput=%EXEDIR%"
 if errorlevel 1 goto :fail
 
 echo.

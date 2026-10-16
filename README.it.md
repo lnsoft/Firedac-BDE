@@ -94,6 +94,8 @@ FDQuery1.Post;
 - **Dialetto SQL = Local SQL del BDE**: niente `LIMIT/TOP`, `CASE`, `COALESCE`, `CURRENT_DATE`, `LENGTH`,
   poche funzioni, join e sottoquery limitati; `LIKE` distingue maiuscole e minuscole; per le date usa i parametri.
   Skip e limite li fa FireDAC lato client. Vedi [docs/LOCAL_SQL.it.md](docs/LOCAL_SQL.it.md).
+  Per `CASE`, `COALESCE`, `LIMIT`, CTE o join tra sorgenti puoi usare il Local SQL di FireDAC
+  (tabelle virtuali SQLite) sopra il driver: [docs/LOCAL_SQL_ON_BDE.it.md](docs/LOCAL_SQL_ON_BDE.it.md) (sperimentale).
 - **Estensioni dei file.** Una cartella può contenere `CLIENTI.DB` e `CLIENTI.DBF`: usa sempre
   l'estensione e i doppi apici (`"CLIENTI.DBF"`); senza, il BDE sceglie Paradox.
 - **Il DBF non ha chiave primaria.** Imposta `UpdateOptions.KeyFields` su un campo davvero univoco,
@@ -111,6 +113,10 @@ FDQuery1.Post;
 - **Una sessione BDE per connessione**; il BDE non è pensato per un multi-threading spinto.
 - Le stringhe sono Unicode; la conversione usa il language driver della tabella, quindi i caratteri
   fuori dalla codepage della tabella possono non sopravvivere.
+- **Il testo dei memo è decodificato con la codepage ANSI di sistema.** Se un'applicazione ha salvato UTF-8
+  dentro un memo (per esempio XML con BOM), si ottengono i byte UTF-8 come caratteri ANSI (`ï»¿<?xml ...`).
+  La conversione è reversibile: ridecodifica nel tuo codice con
+  `TEncoding.UTF8.GetString(TEncoding.ANSI.GetBytes(S))`.
 - Non implementati: DDL (creazione/modifica tabelle via FireDAC), stored procedure, event alerter,
   ottimizzazione array DML (gli array sono eseguiti riga per riga).
 
