@@ -104,7 +104,11 @@ FDQuery1.Post;
   otherwise FireDAC reports *"Exact update affected [N] rows"*.
 - **Memo parameters.** To write a memo with hand-written SQL, give the parameter a memo type
   (`DataType := ftWideMemo; AsWideMemo := ...`). A plain string parameter on a memo column
-  raises no error on Paradox but writes nothing. `Edit/Post` is not affected.
+  raises no error on Paradox/dBase but writes nothing. `Edit/Post` is not affected.
+- **Rollback of an empty memo (dBase III).** Rolling back a transaction that gave a value to a memo that
+  was previously empty can leave the BDE in an inconsistent state: the next query on that row fails with
+  "BLOB already opened". Rows with an existing memo are not affected. Close and reopen the
+  connection after such a rollback. (BDE behaviour, seen on dBase III; not seen on dBase IV.)
 - **Locks.** Waiting time on a locked record is governed by the BDE; use `LockRetry`.
   In the tests a row modified inside an open transaction stayed locked for other connections
   until commit/rollback, on both DBF and Paradox.
@@ -138,11 +142,13 @@ python Tools/make_sample_dbf.py            # creates Demos/Data/SAMPLE.DBF + .DB
 Demos\BDETest.exe Demos\Data SAMPLE.DBF ID NAME NOTES
 ```
 
-`BDETest <folder|alias> <TABLE.DB|DBF> [key field] [text field] [memo field]`
+`BDETest <folder|alias> <TABLE.DB|DBF> [key field] [text field] [memo field] [row 1-5] [date field]`
 
 With a key, text and memo field the test also performs update, insert, delete and memo writes
 inside a transaction that is rolled back, and a lock test with a second connection.
 **Run the write tests on a copy of your data.**
+`BDETest` takes an optional 6th parameter (row 1-5 of the sample used as key); row 3 of `SAMPLE.DBF`
+has a memo, row 1 has none.
 A Paradox sample can be created with `Tools\MakeSampleParadox.dpr` (untested).
 
 ## Repository layout

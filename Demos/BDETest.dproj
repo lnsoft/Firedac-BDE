@@ -69,8 +69,8 @@
         <DCC_IntegerOverflowCheck>true</DCC_IntegerOverflowCheck>
     </PropertyGroup>
     <PropertyGroup Condition="'$(Cfg_2_Win32)'!=''">
-        <Debugger_RunParams>Data SAMPLE.DBF ID NAME NOTES</Debugger_RunParams>
-        <DCC_DcuOutput>..\Dcu\13_2\$(Platform)\$(Config)</DCC_DcuOutput>
+        <Debugger_RunParams>Data SAMPLE.DBF ID NAME NOTES 3 DUE</Debugger_RunParams>
+        <DCC_DcuOutput>..\Dcu\$(Platform)\$(Config)</DCC_DcuOutput>
         <DCC_ExeOutput>..\Exe\$(Platform)</DCC_ExeOutput>
         <DCC_UnitSearchPath>..\Source;$(DCC_UnitSearchPath)</DCC_UnitSearchPath>
         <VerInfo_Locale>1033</VerInfo_Locale>

@@ -32,7 +32,7 @@ copy /y "Demos\Data\SAMPLE.*" "%WORK%\" >nul
 
 echo.
 echo === BDETest su %WORK% ===
-"Exe\Win32\BDETest.exe" "%WORK%" SAMPLE.DBF ID NAME NOTES < nul
+"Exe\Win32\BDETest.exe" "%WORK%" SAMPLE.DBF ID NAME NOTES 3 DUE < nul
 set "RC=%ERRORLEVEL%"
 
 rmdir /s /q "%WORK%"

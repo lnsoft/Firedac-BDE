@@ -100,7 +100,12 @@ FDQuery1.Post;
   altrimenti FireDAC segnala *"Exact update affected [N] rows"*.
 - **Parametri memo.** Per scrivere un memo con SQL scritto a mano dai al parametro un tipo memo
   (`DataType := ftWideMemo; AsWideMemo := ...`). Un parametro stringa su una colonna memo, su Paradox,
-  non dà errore ma non scrive nulla. `Edit/Post` non è interessato.
+  non dà errore ma non scrive nulla (vale anche su dBase). `Edit/Post` non è interessato.
+- **Rollback di un memo vuoto (dBase III).** Annullare con rollback una transazione che ha dato un valore
+  a un memo prima vuoto può lasciare il BDE in uno stato incoerente: la query successiva su quella riga
+  fallisce con "BLOB already opened". Le righe con un memo già presente non sono interessate. Dopo un
+  rollback del genere chiudi e riapri la connessione. (Comportamento del BDE, visto su dBase III;
+  non visto su dBase IV.)
 - **Lock.** L'attesa su un record bloccato dipende dal BDE: usa `LockRetry`. Nei test una riga modificata
   in una transazione aperta resta bloccata per le altre connessioni fino a commit/rollback, sia su DBF sia su Paradox.
 - **Una sessione BDE per connessione**; il BDE non è pensato per un multi-threading spinto.
@@ -132,11 +137,13 @@ python Tools/make_sample_dbf.py            # crea Demos/Data/SAMPLE.DBF + .DBT (
 Demos\BDETest.exe Demos\Data SAMPLE.DBF ID NAME NOTES
 ```
 
-`BDETest <cartella|alias> <TABELLA.DB|DBF> [campo chiave] [campo testo] [campo memo]`
+`BDETest <cartella|alias> <TABELLA.DB|DBF> [campo chiave] [campo testo] [campo memo] [riga 1-5] [campo data]`
 
 Con chiave, testo e memo il test esegue anche update, insert, delete e scrittura del memo dentro una
 transazione annullata con rollback, più un test di lock con una seconda connessione.
 **Esegui i test di scrittura su una copia dei dati.**
+`BDETest` accetta un sesto parametro opzionale (riga 1-5 da usare come chiave); la riga 3 di `SAMPLE.DBF`
+ha un memo, la riga 1 no.
 Una tabella Paradox di prova si crea con `Tools\MakeSampleParadox.dpr` (non provato).
 
 ## Struttura

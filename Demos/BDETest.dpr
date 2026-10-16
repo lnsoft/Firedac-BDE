@@ -37,6 +37,8 @@ var
   Conn: TFDConnection;
   Folder, TabName, SqlTab, KeyField, TextField, MemoField: String;
   FirstKey: Variant;
+  DateField: String;
+  KeyRow: Integer = 1;  // riga (1..5) da cui prendere la chiave: 6o parametro
   FailCount: Integer;
 
 procedure Run(const AName: String; AProc: TProc);
@@ -181,7 +183,7 @@ begin
       for i := 0 to iMax - 1 do
         s := s + Q.Fields[i].AsString + ' | ';
       Writeln('    ', s);
-      if (n = 0) and (KeyField <> '') then
+      if (n = KeyRow - 1) and (KeyField <> '') then
         FirstKey := Q.FieldByName(KeyField).Value;
       Inc(n);
       Q.Next;
@@ -218,6 +220,52 @@ begin
   finally
     Q.Free;
   end;
+end;
+
+procedure TestEscapes;
+var
+  sW: String;
+  iBad: Integer;
+
+  procedure Chk(const AExpr: String);
+  var
+    v: Variant;
+  begin
+    try
+      v := Conn.ExecSQLScalar('select ' + AExpr + ' from ' + SqlTab + sW,
+        [FirstKey]);
+      Write('(', AExpr, ' = ', VarToStr(v), ') ');
+    except
+      on E: Exception do begin
+        Inc(iBad);
+        Write('(ERRORE ', AExpr, ': ', Copy(E.Message, 1, 80), ') ');
+      end;
+    end;
+  end;
+
+begin
+  if (KeyField = '') or (TextField = '') or
+     VarIsNull(FirstKey) or VarIsEmpty(FirstKey) then begin
+    Write('(saltato: servono campo chiave e campo testo) ');
+    Exit;
+  end;
+  iBad := 0;
+  sW := ' where ' + KeyField + ' = :k';
+  Chk('{fn UCASE(' + TextField + ')}');
+  Chk('{fn LCASE(' + TextField + ')}');
+  Chk('{fn LTRIM(' + TextField + ')}');
+  Chk('{fn RTRIM(' + TextField + ')}');
+  Chk('{fn SUBSTRING(' + TextField + ', 1, 4)}');
+  Chk('{fn CONCAT(' + TextField + ', ''-x'')}');
+  Chk('{fn CONVERT(' + KeyField + ', CHAR)}');
+  Chk('{fn CONVERT(' + KeyField + ', INT)}');
+  if DateField <> '' then begin
+    Chk('{fn YEAR(' + DateField + ')}');
+    Chk('{fn MONTH(' + DateField + ')}');
+    Chk('{fn DAYOFMONTH(' + DateField + ')}');
+  end;
+  if iBad > 0 then
+    raise Exception.Create(IntToStr(iBad) + ' escape non funzionanti');
 end;
 
 procedure TestParam;
@@ -454,10 +502,25 @@ begin
             Length(sRead), ', inizio="', Copy(sRead, 1, 30), '") ');
       end;
     finally
-      Conn.Rollback;
+      Write('(sOld=', Length(sOld), ' car.) ');
+      try
+        Conn.Rollback;
+      except
+        on E: Exception do begin
+          Write('(ERRORE in ROLLBACK) ');
+          raise;
+        end;
+      end;
     end;
-    Q.Close;
-    Q.Open;
+    try
+      Q.Close;
+      Q.Open;
+    except
+      on E: Exception do begin
+        Write('(ERRORE nella riapertura dopo rollback) ');
+        raise;
+      end;
+    end;
     if Q.FieldByName(MemoField).AsString = sOld then
       Write('(rollback ok) ')
     else
@@ -552,6 +615,11 @@ begin
   MemoField := '';
   if ParamCount >= 5 then
     MemoField := ParamStr(5);
+  if ParamCount >= 6 then
+    KeyRow := StrToIntDef(ParamStr(6), 1);
+  DateField := '';
+  if ParamCount >= 7 then
+    DateField := ParamStr(7);
   FirstKey := Null;
   FailCount := 0;
 
@@ -570,6 +638,7 @@ begin
       Run('Count e fetch completo', TestCount);
       Run('Query con parametro', TestParam);
       Run('TFDTable e Locate', TestTable);
+      Run('Funzioni escape Local SQL', TestEscapes);
       if TextField <> '' then
         Run('Scrittura con rollback', TestWrite);
       if KeyField <> '' then
