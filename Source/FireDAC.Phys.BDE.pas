@@ -68,12 +68,18 @@ type
     function GetConnParams(AKeys: TStrings; AParams: TFDDatSTable): TFDDatSTable; override;
   end;
 
-  TFDPhysBDEConnection = class(TFDPhysConnection)
+  TFDPhysBDEConnection = class(TFDPhysConnection, IFDPhysBDEHooks)
   private
     FSession: TSession;
     FOwnPrivateDir: String;
     FDatabase: TDatabase;
     FTableCursor: Boolean;
+    FOnIndexNeeded: TBDEIndexNeededEvent;
+    FOnSetRange: TBDESetRangeEvent;
+    function GetOnIndexNeeded: TBDEIndexNeededEvent;
+    procedure SetOnIndexNeeded(const AValue: TBDEIndexNeededEvent);
+    function GetOnSetRange: TBDESetRangeEvent;
+    procedure SetOnSetRange(const AValue: TBDESetRangeEvent);
   protected
     procedure InternalConnect; override;
     procedure InternalDisconnect; override;
@@ -116,6 +122,9 @@ type
     FColNames: TArray<String>;
     FConds: TArray<TBDERangeCond>;   // WHERE per SetRange (con ORDER BY)
     FOrderFields: TArray<String>;
+    FUserExc: Exception;             // eccezione sollevata da OnBDEIndexNeeded
+    FStdRange: Boolean;              // le condizioni sono servibili dal SetRange standard
+    FIndexName: String;              // indice in uso (nome per gli eventi)
     FEqIdx: TArray<Integer>;         // indici in FConds delle uguaglianze, per posizione
     FLoIdx, FHiIdx: Integer;         // limite inferiore / superiore (-1 = nessuno)
     FColumnIndex: Integer;
@@ -161,15 +170,16 @@ type
 // Qualsiasi altra cosa (WHERE, ORDER BY, JOIN, alias, funzioni, parametri...) non
 // corrisponde e resta al TQuery.
 function ParseSimpleSelect(const ASQL: String; out ATable: String;
-  out ACols, AOrder: TArray<String>; out AConds: TArray<TBDERangeCond>): Boolean;
+  out ACols, AOrder: TArray<String>; out AConds: TArray<TBDERangeCond>;
+  out ADesc: Boolean): Boolean;
 const
-  C_Cond = '\w+\s*(?:>=|<=|=|>|<)\s*(?::\w+|-?\d+(?:\.\d+)?)';
+  C_Cond = '\w+\s*(?:>=|<=|=|>|<)\s*(?::\w+|-?\d+(?:\.\d+)?|''[^'']*'')';
   C_Col = '(?:\w+\.)?(?:\w+|\*)';
   C_Pattern = '^\s*SELECT\s+(' + C_Col + '(?:\s*,\s*' + C_Col + ')*)\s+FROM\s+("[^"]+"|[\w$.]+)' +
     '(?:\s+(?:AS\s+)?(?!WHERE\b|ORDER\b)(\w+))?' +
     '(?:\s+WHERE\s+(' + C_Cond + '(?:\s+AND\s+' + C_Cond + ')*))?' +
-    '(?:\s+ORDER\s+BY\s+(\w+(?:\s+ASC)?(?:\s*,\s*\w+(?:\s+ASC)?)*))?\s*;?\s*$';
-  C_CondParse = '(\w+)\s*(>=|<=|=|>|<)\s*(?::(\w+)|(-?\d+(?:\.\d+)?))';
+    '(?:\s+ORDER\s+BY\s+(\w+(?:\s+(?:ASC|DESC))?(?:\s*,\s*\w+(?:\s+(?:ASC|DESC))?)*))?\s*;?\s*$';
+  C_CondParse = '(\w+)\s*(>=|<=|=|>|<)\s*(?::(\w+)|(-?\d+(?:\.\d+)?)|''([^'']*)'')';
 var
   oM: TMatch;
   oMC: TMatchCollection;
@@ -177,8 +187,12 @@ var
   i: Integer;
   s, sAlias: String;
   aItems: TArray<String>;
+  nAsc, nDesc: Integer;
 begin
   Result := False;
+  ADesc := False;
+  nAsc := 0;
+  nDesc := 0;
   ATable := '';
   SetLength(ACols, 0);
   SetLength(AOrder, 0);
@@ -208,7 +222,7 @@ begin
       SetLength(ACols, 0);
     end;
   end;
-  // ORDER BY solo crescente (ASC facoltativo): il DESC resta al TQuery
+  // ORDER BY: tutti i campi crescenti oppure tutti discendenti (misti: restano al TQuery)
   if (oM.Groups.Count > 4) and (oM.Groups[4].Value <> '') then begin
     // WHERE: condizioni semplici unite da AND (campo, operatore, :parametro o numero)
     oMC := TRegEx.Matches(oM.Groups[4].Value, C_CondParse, [roIgnoreCase]);
@@ -224,6 +238,8 @@ begin
         AConds[i].Param := oMC[i].Groups[3].Value
       else if (oMC[i].Groups.Count > 4) and (oMC[i].Groups[4].Value <> '') then
         AConds[i].Literal := StrToFloat(oMC[i].Groups[4].Value, TFormatSettings.Invariant)
+      else if (oMC[i].Groups.Count > 5) and (Pos('''', oMC[i].Value) > 0) then
+        AConds[i].Literal := oMC[i].Groups[5].Value    // testo (anche vuoto)
       else
         Exit;
     end;
@@ -232,13 +248,94 @@ begin
     aItems := oM.Groups[5].Value.Split([',']);
     SetLength(AOrder, Length(aItems));
     for i := 0 to High(aItems) do begin
-      oI := TRegEx.Match(Trim(aItems[i]), '^(\w+)(?:\s+ASC)?$', [roIgnoreCase]);
+      oI := TRegEx.Match(Trim(aItems[i]), '^(\w+)(?:\s+(ASC|DESC))?$', [roIgnoreCase]);
       if not oI.Success then
         Exit;
       AOrder[i] := oI.Groups[1].Value;
+      if (oI.Groups.Count > 2) and SameText(oI.Groups[2].Value, 'DESC') then
+        Inc(nDesc)
+      else
+        Inc(nAsc);
     end;
+    if (nAsc > 0) and (nDesc > 0) then
+      Exit;
+    ADesc := nDesc > 0;
   end;
   Result := True;
+end;
+
+// --- scelta dell'indice per il percorso TTable ---------------------------------
+function IndexFieldList(ADef: TIndexDef): TArray<String>;
+var
+  i: Integer;
+begin
+  Result := ADef.Fields.Split([';']);
+  for i := 0 to High(Result) do
+    Result[i] := Trim(Result[i]);
+end;
+
+// I primi campi dell'indice sono AFields (nello stesso ordine; con ASet: gli stessi, in
+// qualunque ordine)
+function IndexLeads(ADef: TIndexDef; const AFields: TArray<String>; ASet: Boolean): Boolean;
+var
+  aF: TArray<String>;
+  i, k: Integer;
+  bHit: Boolean;
+begin
+  Result := False;
+  aF := IndexFieldList(ADef);
+  if Length(aF) < Length(AFields) then
+    Exit;
+  for i := 0 to High(AFields) do
+    if ASet then begin
+      bHit := False;
+      for k := 0 to High(AFields) do
+        if SameText(aF[k], AFields[i]) then begin
+          bHit := True;
+          Break;
+        end;
+      if not bHit then
+        Exit;
+    end
+    else if not SameText(aF[i], AFields[i]) then
+      Exit;
+  Result := True;
+end;
+
+// Indice "semplice": campi (niente espressioni, niente maiuscole/minuscole indifferenti)
+// con il verso richiesto
+function IndexMatches(ADef: TIndexDef; const AFields: TArray<String>;
+  ADesc, ASet: Boolean): Boolean;
+begin
+  Result := (ADef.Options * [ixExpression, ixCaseInsensitive] = []) and
+    ((ixDescending in ADef.Options) = ADesc) and IndexLeads(ADef, AFields, ASet);
+end;
+
+function IsNumericFieldType(AType: TFieldType): Boolean;
+begin
+  Result := AType in [ftSmallint, ftInteger, ftWord, ftFloat, ftCurrency, ftBCD, ftAutoInc,
+    ftLargeint];
+end;
+
+function IndexEventName(ADef: TIndexDef): String;
+begin
+  if ADef.Name = '' then
+    Result := S_BDE_PrimaryIndex
+  else
+    Result := ADef.Name;
+end;
+
+function FindIndexByName(ATab: TTable; const AName: String): TIndexDef;
+var
+  i: Integer;
+begin
+  Result := nil;
+  for i := 0 to ATab.IndexDefs.Count - 1 do
+    if ((AName = S_BDE_PrimaryIndex) and (ATab.IndexDefs[i].Name = '')) or
+       ((ATab.IndexDefs[i].Name <> '') and SameText(ATab.IndexDefs[i].Name, AName)) then begin
+      Result := ATab.IndexDefs[i];
+      Exit;
+    end;
 end;
 
 procedure BDEError(AOwner: TObject; E: EDBEngineError; ARow: Integer = -1);
@@ -409,6 +506,26 @@ end;
 {-------------------------------------------------------------------------------}
 { TFDPhysBDEConnection                                                          }
 {-------------------------------------------------------------------------------}
+function TFDPhysBDEConnection.GetOnIndexNeeded: TBDEIndexNeededEvent;
+begin
+  Result := FOnIndexNeeded;
+end;
+
+procedure TFDPhysBDEConnection.SetOnIndexNeeded(const AValue: TBDEIndexNeededEvent);
+begin
+  FOnIndexNeeded := AValue;
+end;
+
+function TFDPhysBDEConnection.GetOnSetRange: TBDESetRangeEvent;
+begin
+  Result := FOnSetRange;
+end;
+
+procedure TFDPhysBDEConnection.SetOnSetRange(const AValue: TBDESetRangeEvent);
+begin
+  FOnSetRange := AValue;
+end;
+
 destructor TFDPhysBDEConnection.Destroy;
 begin
   inherited Destroy;
@@ -598,16 +715,21 @@ var
   aCols, aOrder, aF: TArray<String>;
   aConds: TArray<TBDERangeCond>;
   aEqIdx: TArray<Integer>;
+  aKey: TArray<String>;
   oTab: TTable;
   oDef: TIndexDef;
+  oUserExc: Exception;
   i, k, p, iEq, iLo, iHi, nEq, nOth: Integer;
-  bFound, bOk: Boolean;
+  bOk, bDesc, bHook, bSet, bAccept, bRangeHook, bNonNum, bStd: Boolean;
 begin
   Result := False;
   if GetCommandKind <> skSelect then
     Exit;
-  if not ParseSimpleSelect(FDbCommandText, sTab, aCols, aOrder, aConds) then
+  if not ParseSimpleSelect(FDbCommandText, sTab, aCols, aOrder, aConds, bDesc) then
     Exit;
+  FUserExc := nil;
+  FIndexName := '';
+  FStdRange := True;
   oTab := TTable.Create(nil);
   try
     try
@@ -619,42 +741,105 @@ begin
       for i := 0 to High(aCols) do      // e contenere i campi richiesti
         if oTab.FieldDefs.IndexOf(aCols[i]) < 0 then
           raise Exception.Create('campo non trovato: ' + aCols[i]);
-      if Length(aOrder) > 0 then begin
-        // ORDER BY: serve un indice sui campi semplici, nello stesso ordine
-        // (escluso: espressioni, discendenti, senza distinzione maiuscole/minuscole)
-        for i := 0 to High(aOrder) do
-          if oTab.FieldDefs.IndexOf(aOrder[i]) < 0 then
-            raise Exception.Create('campo non trovato: ' + aOrder[i]);
-        oTab.IndexDefs.Update;
-        bFound := False;
-        sIdx := '';
-        for i := 0 to oTab.IndexDefs.Count - 1 do begin
-          oDef := oTab.IndexDefs[i];
-          if oDef.Options * [ixExpression, ixDescending, ixCaseInsensitive] <> [] then
-            Continue;
-          aF := oDef.Fields.Split([';']);
-          if Length(aF) < Length(aOrder) then
-            Continue;
-          bOk := True;
-          for k := 0 to High(aOrder) do
-            if not SameText(Trim(aF[k]), aOrder[k]) then begin
-              bOk := False;
-              Break;
-            end;
-          if bOk then begin
-            sIdx := oDef.Name;
-            bFound := True;
-            Break;
+      // Indice: per l'ORDER BY, oppure (solo con OnBDEIndexNeeded) per un WHERE senza ORDER BY
+      bHook := Assigned(BDEConnection.FOnIndexNeeded);
+      bRangeHook := Assigned(BDEConnection.FOnSetRange);
+      bSet := False;
+      aKey := aOrder;
+      if (Length(aOrder) = 0) and (Length(aConds) > 0) then begin
+        if not bHook then
+          raise Exception.Create('WHERE senza ORDER BY');
+        bSet := True;
+        SetLength(aKey, 0);
+        for i := 0 to High(aConds) do begin
+          bOk := False;
+          for k := 0 to High(aKey) do
+            if SameText(aKey[k], aConds[i].Field) then
+              bOk := True;
+          if not bOk then begin
+            SetLength(aKey, Length(aKey) + 1);
+            aKey[High(aKey)] := aConds[i].Field;
           end;
         end;
-        if not bFound then
+      end;
+      if bDesc and not bHook then
+        raise Exception.Create('ORDER BY discendente');
+      if Length(aKey) > 0 then begin
+        for i := 0 to High(aKey) do
+          if oTab.FieldDefs.IndexOf(aKey[i]) < 0 then
+            raise Exception.Create('campo non trovato: ' + aKey[i]);
+        oTab.IndexDefs.Update;
+        // campi del WHERE non numerici (testo, date): il driver non sa servirli da solo
+        bNonNum := False;
+        for i := 0 to High(aConds) do begin
+          k := oTab.FieldDefs.IndexOf(aConds[i].Field);
+          if (k >= 0) and not IsNumericFieldType(oTab.FieldDefs[k].DataType) then
+            bNonNum := True;
+        end;
+        // proposta del driver: primo indice semplice sui campi richiesti, nello stesso verso
+        oDef := nil;
+        for i := 0 to oTab.IndexDefs.Count - 1 do
+          if IndexMatches(oTab.IndexDefs[i], aKey, bDesc, bSet) then begin
+            oDef := oTab.IndexDefs[i];
+            Break;
+          end;
+        if bHook then begin
+          // il programma puo' cambiare l'indice o rifiutare; senza proposta (anche per i campi
+          // non numerici) l'accettazione parte da False: il comportamento standard
+          if bNonNum then
+            oDef := nil;
+          sIdx := '';
+          if oDef <> nil then
+            sIdx := IndexEventName(oDef);
+          bAccept := oDef <> nil;
+          try
+            BDEConnection.FOnIndexNeeded(BDEConnection, sTab, string.Join(';', aKey),
+              FDbCommandText, bDesc, sIdx, bAccept);
+          except
+            FUserExc := Exception(AcquireExceptionObject);   // riproposta dopo la pulizia
+            raise Exception.Create('errore dell''evento');
+          end;
+          if (not bAccept) or (sIdx = '') then
+            raise Exception.Create('indice rifiutato');
+          oDef := FindIndexByName(oTab, sIdx);
+          if oDef = nil then
+            raise Exception.Create('indice non trovato: ' + sIdx);
+          if not (ixExpression in oDef.Options) then begin
+            // indice a campi: si controllano campi e verso (un indice-espressione e'
+            // responsabilita' del programma)
+            if (ixDescending in oDef.Options) <> bDesc then
+              raise Exception.Create('verso dell''indice diverso dall''ORDER BY');
+            if not IndexLeads(oDef, aKey, bSet) then
+              raise Exception.Create('l''indice non corrisponde ai campi');
+          end
+          else if ((Length(aConds) > 0) or bSet) and not bRangeHook then
+            raise Exception.Create('indice-espressione con WHERE');
+          // con un indice discendente il SetRange standard non e' usato: serve OnBDESetRange
+          if (ixDescending in oDef.Options) and (Length(aConds) > 0) and not bRangeHook then
+            raise Exception.Create('WHERE con indice discendente');
+        end
+        else if oDef = nil then
           raise Exception.Create('nessun indice per l''ORDER BY');
-        oTab.IndexName := sIdx;
+        if bSet then begin
+          // WHERE senza ORDER BY: i campi dell'indice scelto diventano l'ordinamento
+          SetLength(aOrder, Length(aKey));
+          if ixExpression in oDef.Options then
+            aOrder := Copy(aKey)
+          else begin
+            aF := IndexFieldList(oDef);
+            for i := 0 to High(aKey) do
+              aOrder[i] := aF[i];
+          end;
+        end;
+        FIndexName := IndexEventName(oDef);
+        oTab.IndexName := oDef.Name;
       end;
       iEq := 0;
       iLo := -1;
       iHi := -1;
-      if Length(aConds) > 0 then begin
+      bStd := True;
+      if Length(aConds) > 0 then
+      try
         // WHERE: ammesso solo con ORDER BY, su campi numerici dell'ORDER BY:
         // uguaglianze sui primi campi, poi al piu' un intervallo sul campo successivo
         if Length(aOrder) = 0 then
@@ -669,8 +854,7 @@ begin
           if p < 0 then
             raise Exception.Create('campo del WHERE fuori dall''ORDER BY');
           aConds[i].Pos := p;
-          if not (oTab.FieldDefs[oTab.FieldDefs.IndexOf(aOrder[p])].DataType in
-             [ftSmallint, ftInteger, ftWord, ftFloat, ftCurrency, ftBCD, ftAutoInc, ftLargeint]) then
+          if not IsNumericFieldType(oTab.FieldDefs[oTab.FieldDefs.IndexOf(aOrder[p])].DataType) then
             raise Exception.Create('campo non numerico nel WHERE');
         end;
         SetLength(aEqIdx, 0);
@@ -715,10 +899,25 @@ begin
             end;
         if nOth <> Length(aConds) then
           raise Exception.Create('condizioni non gestite');
+      except
+        // il SetRange standard non puo' servire queste condizioni: serve OnBDESetRange
+        bStd := False;
+        iEq := 0;
+        iLo := -1;
+        iHi := -1;
+        SetLength(aEqIdx, 0);
       end;
+      if not bStd and not bRangeHook then
+        raise Exception.Create('condizioni non gestite');
     except
       // qualsiasi dubbio: si torna al TQuery, che riporta l'errore corretto
-      FDFree(oTab);
+      FDFreeAndNil(oTab);
+      if FUserExc <> nil then begin
+        // ...tranne un errore sollevato dall'evento del programma: quello si propaga
+        oUserExc := FUserExc;
+        FUserExc := nil;
+        raise oUserExc;
+      end;
       Exit;
     end;
     FTable := oTab;
@@ -729,6 +928,7 @@ begin
     FEqIdx := aEqIdx;
     FLoIdx := iLo;
     FHiIdx := iHi;
+    FStdRange := bStd;
     Result := True;
   except
     FDFree(oTab);
@@ -805,10 +1005,32 @@ end;
 function TFDPhysBDECommand.SetupTableRange: Boolean;
 var
   aEq: TArray<Variant>;
-  vLo, vHi: Variant;
+  aCnd: TArray<TBDECondition>;
+  vLo, vHi, vTmp: Variant;
   i, n: Integer;
+  bHandled: Boolean;
 begin
   Result := False;
+  if Assigned(BDEConnection.FOnSetRange) then begin
+    // il programma puo' impostare l'intervallo da se' (tabella aperta sull'indice in uso)
+    FTable.Close;
+    FTable.Open;
+    SetLength(aCnd, Length(FConds));
+    for i := 0 to High(FConds) do begin
+      aCnd[i].Field := FConds[i].Field;
+      aCnd[i].Op := FConds[i].Op;
+      CondValue(i, vTmp);            // il valore resta anche se non e' numerico
+      aCnd[i].Value := vTmp;
+    end;
+    bHandled := False;
+    BDEConnection.FOnSetRange(BDEConnection, FTable, FIndexName, aCnd, bHandled);
+    if bHandled then begin
+      Result := True;
+      Exit;
+    end;
+  end;
+  if not FStdRange then
+    Exit;
   SetLength(aEq, Length(FEqIdx));
   for i := 0 to High(FEqIdx) do
     if not CondValue(FEqIdx[i], aEq[i]) then

@@ -53,6 +53,91 @@ needs 0.25 s just to walk the cursor and 2.5 s to read the 32 fields (the same w
 about three quarters of the time is the BDE reading field values; FireDAC and the driver add about 0.8 s. Reading
 only the fields you need (`select NUMERO, RIGA, QTA from ...`) cuts the cost in proportion.
 
+## Choosing the index and the range yourself: `OnBDEIndexNeeded`, `OnBDESetRange`
+
+With `TableCursor=True` the driver can ask you two things, through optional runtime events on the connection.
+**If you assign neither, nothing changes**: the driver decides alone with the rules above. They only apply to
+single-table `SELECT`s; joins, functions and anything the parser does not recognise always go to the `TQuery`.
+
+```pascal
+procedure TForm1.FDConnection1AfterConnect(Sender: TObject);
+begin
+  FDConnection1.OnBDEIndexNeeded := IndexNeeded;   // after the connection is open
+  FDConnection1.OnBDESetRange := SetRangeNeeded;
+end;
+
+procedure TForm1.IndexNeeded(Sender: TObject; const ATableName, AFieldNames, ASQL: String;
+  ADescending: Boolean; var AIndexName: String; var AAccept: Boolean);
+begin
+  // AIndexName is the driver's proposal ('' = it has none); AAccept starts True only if it has one
+  if SameText(ATableName, 'ORDERS.DBF') and SameText(AFieldNames, 'CUSTOMER;DATE') then begin
+    AIndexName := 'CUSTDATE';
+    AAccept := True;
+  end;
+end;
+
+procedure TForm1.SetRangeNeeded(Sender: TObject; ADataSet: TDataSet; const AIndexName: String;
+  const AConditions: TArray<TBDECondition>; var AHandled: Boolean);
+begin
+  // ADataSet is the TTable, already open on AIndexName
+  if SameText(AConditions[0].Field, 'CUSTOMER') and (AConditions[0].Op = '=') then begin
+    TTable(ADataSet).SetRangeStart;
+    TTable(ADataSet).FieldByName('CUSTOMER').AsString := AConditions[0].Value;
+    TTable(ADataSet).SetRangeEnd;
+    TTable(ADataSet).FieldByName('CUSTOMER').AsString := AConditions[0].Value;
+    TTable(ADataSet).ApplyRange;
+    AHandled := True;
+  end;
+end;
+```
+
+### `OnBDEIndexNeeded`
+
+Called while preparing a `SELECT` that needs an index:
+
+| Argument       | Meaning |
+|----------------|---------|
+| `ATableName`   | table in the `FROM`, without quotes |
+| `AFieldNames`  | the `ORDER BY` fields, separated by `;`; if there is no `ORDER BY`, the fields of the `WHERE` (simple conditions joined by `AND`) |
+| `ASQL`         | the statement |
+| `ADescending`  | `True` if the `ORDER BY` is `DESC` (all fields descending; mixed directions are never served by a `TTable`) |
+| `AIndexName`   | in: the index the driver proposes, `''` if it has none; out: the index to use. `S_BDE_PrimaryIndex` (`'(primary)'`) is the Paradox primary key |
+| `AAccept`      | in: `True` if the driver has a proposal, `False` if not; set it to `True` to take the query over, to `False` to run it with the `TQuery` |
+
+The driver has **no proposal** (empty `AIndexName`, `AAccept = False`) when it cannot serve the query by itself:
+`ORDER BY ... DESC` without a descending index, a `WHERE` with text or date fields, and so on. If you do nothing,
+the query runs as usual with the `TQuery`. To take it over, set the index **and** `AAccept := True`.
+
+- **`WHERE` without `ORDER BY`**: with the index you return, the conditions are served with a `SetRange`. The rows
+  come back in index order.
+- **Another index than the proposed one**, including expression and case-insensitive indexes. For an index made of
+  plain fields the driver checks that its first fields are the requested ones and that the direction matches; for an
+  expression index (`ixExpression`) the check is yours.
+
+### `OnBDESetRange`
+
+Called when opening a `SELECT` with a `WHERE` served by a `TTable`, after the table is open on the index in use and
+before the driver sets its own range. `AConditions` has one entry per condition (`Field`, `Op` = `=`, `>`, `>=`,
+`<`, `<=`, and `Value`: the parameter value, `Null` for NULL, or the number or text written in the SQL).
+
+- Set `AHandled := True` after calling `SetRangeStart` / `SetRangeEnd` / `ApplyRange` yourself. The driver then does
+  nothing else: **you answer for the range being equivalent to the `WHERE`**. This is how text and date conditions
+  can be served (note that a `SetRange` on a text field has prefix semantics, and dates must be converted).
+- Leave `AHandled := False` and the standard behaviour applies: the driver's own `SetRange` if the conditions are
+  numeric and fit the index, otherwise the `TQuery`.
+
+With `OnBDESetRange` assigned the driver no longer rejects at prepare time a `WHERE` on text or date fields, or
+conditions that its own `SetRange` cannot express; if you do not handle them, the query goes to the `TQuery` when
+it is opened. A descending or expression index is also accepted with a `WHERE` (the range is yours).
+
+### Notes
+
+- An exception raised by your handlers is **not** swallowed: it reaches the caller.
+- If `AAccept` is `False`, `AIndexName` is empty or unknown, or the index does not fit, the query runs with the
+  `TQuery`, exactly as without the event.
+- The physical connection is created at every `Connected := True`, so assign the events after connecting (for
+  example in `AfterConnect`). They are a class helper declared in `FireDAC.Phys.BDEDef`.
+
 ## Differences from the TQuery
 
 * The TTable is a **live** cursor: rows changed by other users while you read may show up; a TQuery works on a copy.

@@ -471,6 +471,242 @@ begin
   end;
 end;
 
+type
+  // gestore di prova per OnBDEIndexNeeded
+  TIdxProbe = class
+  public
+    Calls: Integer;
+    Mode: Integer;            // 0 accetta la proposta, 1 rifiuta, 2 indice inesistente, 3 solleva un errore
+    LastTable, LastFields: String;
+    LastDesc: Boolean;
+    LastProposed: String;
+    LastAcceptIn: Boolean;
+    RangeCalls: Integer;
+    RangeMode: Integer;       // 0 non gestisce (comportamento standard), 1 imposta lui il SetRange
+    RangeCondCount: Integer;
+    RangeField, RangeOp: String;
+    procedure OnRange(Sender: TObject; ADataSet: TDataSet; const AIndexName: String;
+      const AConditions: TArray<TBDECondition>; var AHandled: Boolean);
+    procedure OnNeeded(Sender: TObject; const ATableName, AFieldNames, ASQL: String;
+      ADescending: Boolean; var AIndexName: String; var AAccept: Boolean);
+  end;
+
+procedure TIdxProbe.OnNeeded(Sender: TObject; const ATableName, AFieldNames, ASQL: String;
+  ADescending: Boolean; var AIndexName: String; var AAccept: Boolean);
+begin
+  Inc(Calls);
+  LastAcceptIn := AAccept;
+  LastTable := ATableName;
+  LastFields := AFieldNames;
+  LastDesc := ADescending;
+  LastProposed := AIndexName;
+  case Mode of
+  1: AAccept := False;
+  2: AIndexName := 'INDICE_CHE_NON_ESISTE';
+  3: raise Exception.Create('errore di prova');
+  end;
+end;
+
+procedure TIdxProbe.OnRange(Sender: TObject; ADataSet: TDataSet; const AIndexName: String;
+  const AConditions: TArray<TBDECondition>; var AHandled: Boolean);
+var
+  T: TTable;
+begin
+  Inc(RangeCalls);
+  RangeCondCount := Length(AConditions);
+  if RangeCondCount > 0 then begin
+    RangeField := AConditions[0].Field;
+    RangeOp := AConditions[0].Op;
+  end;
+  if (RangeMode = 1) and (RangeCondCount = 1) and (AConditions[0].Op = '=') then begin
+    T := TTable(ADataSet);
+    T.SetRangeStart;
+    T.FieldByName(AConditions[0].Field).Value := AConditions[0].Value;
+    T.SetRangeEnd;
+    T.FieldByName(AConditions[0].Field).Value := AConditions[0].Value;
+    T.ApplyRange;
+    AHandled := True;
+  end;
+end;
+
+// OnBDEIndexNeeded: il programma sceglie l'indice o rifiuta; senza gestore non cambia nulla
+procedure TestIndexNeeded;
+var
+  C2: TFDConnection;
+  QA, QB: TFDQuery;
+  P: TIdxProbe;
+  bNum, bRaised: Boolean;
+
+  // esegue la query sulle due connessioni (Conn senza TableCursor, C2 con TableCursor e
+  // gestore) e confronta le righe; torna True se C2 ha usato la TTable
+  function RunBoth(const ASQL: String; const AParam: Variant; AOrdered: Boolean;
+    const ALabel: String): Boolean;
+  var
+    m0, nA, nB: Integer;
+  begin
+    if VarIsEmpty(AParam) then QA.Open(ASQL) else QA.Open(ASQL, [AParam]);
+    m0 := BDEStatTableCursorOpens;
+    try
+      if VarIsEmpty(AParam) then QB.Open(ASQL) else QB.Open(ASQL, [AParam]);
+      Result := BDEStatTableCursorOpens > m0;
+      nA := 0;
+      nB := 0;
+      while (not QA.Eof) and (not QB.Eof) do begin
+        if AOrdered and (QA.FieldByName(KeyField).AsString <> QB.FieldByName(KeyField).AsString) then
+          raise Exception.CreateFmt('%s: riga %d, chiave diversa', [ALabel, nA + 1]);
+        Inc(nA);
+        Inc(nB);
+        QA.Next;
+        QB.Next;
+      end;
+      while not QA.Eof do begin Inc(nA); QA.Next; end;
+      while not QB.Eof do begin Inc(nB); QB.Next; end;
+      if nA <> nB then
+        raise Exception.CreateFmt('%s: righe diverse (%d / %d)', [ALabel, nA, nB]);
+    finally
+      QA.Close;
+      QB.Close;
+    end;
+  end;
+
+var
+  m0: Integer;
+  bTab: Boolean;
+  sTxt: String;
+begin
+  C2 := TFDConnection.Create(nil);
+  QA := TFDQuery.Create(nil);
+  QB := TFDQuery.Create(nil);
+  P := TIdxProbe.Create;
+  try
+    C2.DriverName := 'BDE';
+    C2.LoginPrompt := False;
+    C2.Params.Database := Folder;
+    C2.Params.Values['TableCursor'] := 'True';
+    C2.Open;
+    QA.Connection := Conn;
+    QB.Connection := C2;
+    bNum := (not VarIsNull(FirstKey)) and (not VarIsEmpty(FirstKey)) and VarIsNumeric(FirstKey);
+
+    C2.OnBDEIndexNeeded := P.OnNeeded;
+    if not Assigned(C2.OnBDEIndexNeeded) then
+      raise Exception.Create('il gestore non e'' stato registrato');
+
+    // 1) ORDER BY: il gestore e' chiamato con i campi e la proposta del driver
+    P.Mode := 0;
+    P.Calls := 0;
+    bTab := RunBoth('select * from ' + SqlTab + ' order by ' + KeyField, Unassigned, True, 'order by');
+    if P.Calls <> 1 then
+      raise Exception.CreateFmt('order by: gestore chiamato %d volte (atteso 1)', [P.Calls]);
+    if not SameText(P.LastFields, KeyField) then
+      raise Exception.Create('order by: campi ricevuti ' + P.LastFields);
+    if bTab <> (P.LastProposed <> '') then
+      raise Exception.Create('order by: uso della TTable incoerente con la proposta');
+    Write('(order by: proposta "', P.LastProposed, '", TTable ', BoolToStr(bTab, True), ') ');
+
+    // 2) il gestore rifiuta: TQuery
+    P.Mode := 1;
+    P.Calls := 0;
+    if RunBoth('select * from ' + SqlTab + ' order by ' + KeyField, Unassigned, True, 'rifiuto')
+       or (P.Calls <> 1) then
+      raise Exception.Create('rifiuto: la TTable non doveva essere usata');
+
+    // 3) indice inesistente: TQuery, nessun errore
+    P.Mode := 2;
+    P.Calls := 0;
+    if RunBoth('select * from ' + SqlTab + ' order by ' + KeyField, Unassigned, True, 'indice inesistente')
+       or (P.Calls <> 1) then
+      raise Exception.Create('indice inesistente: la TTable non doveva essere usata');
+
+    // 4) ORDER BY discendente: il gestore e' chiamato con ADescending = True
+    P.Mode := 0;
+    P.Calls := 0;
+    bTab := RunBoth('select * from ' + SqlTab + ' order by ' + KeyField + ' desc', Unassigned, True, 'desc');
+    if (P.Calls <> 1) or not P.LastDesc then
+      raise Exception.Create('desc: gestore non chiamato come atteso');
+    Write('(desc: proposta "', P.LastProposed, '", TTable ', BoolToStr(bTab, True), ') ');
+
+    // 5) WHERE senza ORDER BY: oggi resta al TQuery, con il gestore puo' usare un indice
+    if bNum then begin
+      P.Mode := 0;
+      P.Calls := 0;
+      bTab := RunBoth('select * from ' + SqlTab + ' where ' + KeyField + ' = :k', FirstKey, False, 'where');
+      if (P.Calls <> 1) or not SameText(P.LastFields, KeyField) then
+        raise Exception.Create('where: gestore non chiamato come atteso');
+      if bTab <> (P.LastProposed <> '') then
+        raise Exception.Create('where: uso della TTable incoerente con la proposta');
+      Write('(where senza order by: proposta "', P.LastProposed, '", TTable ', BoolToStr(bTab, True), ') ');
+    end;
+
+    // 6) un errore del gestore si propaga (non viene scambiato per "query non gestita")
+    P.Mode := 3;
+    bRaised := False;
+    try
+      QB.Open('select * from ' + SqlTab + ' order by ' + KeyField);
+    except
+      on E: Exception do
+        bRaised := Pos('errore di prova', E.Message) > 0;
+    end;
+    QB.Close;
+    if not bRaised then
+      raise Exception.Create('l''errore del gestore non si e'' propagato');
+
+    // 7) OnBDESetRange: il programma imposta l'intervallo, oppure lascia fare al driver
+    if bNum then begin
+      C2.OnBDESetRange := P.OnRange;
+      if not Assigned(C2.OnBDESetRange) then
+        raise Exception.Create('OnBDESetRange non registrato');
+      P.Mode := 0;
+      P.RangeMode := 1;
+      P.RangeCalls := 0;
+      bTab := RunBoth('select * from ' + SqlTab + ' where ' + KeyField + ' = :k order by ' + KeyField,
+        FirstKey, True, 'setrange gestito');
+      if bTab <> (P.RangeCalls = 1) then
+        raise Exception.Create('setrange gestito: chiamate incoerenti con l''uso della TTable');
+      if bTab and ((P.RangeCondCount <> 1) or (not SameText(P.RangeField, KeyField)) or (P.RangeOp <> '=')) then
+        raise Exception.Create('setrange gestito: condizioni ricevute errate');
+      Write('(setrange gestito: TTable ', BoolToStr(bTab, True), ') ');
+      P.RangeMode := 0;
+      P.RangeCalls := 0;
+      bTab := RunBoth('select * from ' + SqlTab + ' where ' + KeyField + ' = :k order by ' + KeyField,
+        FirstKey, True, 'setrange standard');
+      if bTab <> (P.RangeCalls = 1) then
+        raise Exception.Create('setrange standard: chiamate incoerenti con l''uso della TTable');
+    end;
+
+    // 8) WHERE su un campo testo: nessuna proposta e accettazione a False, quindi TQuery
+    if TextField <> '' then begin
+      QA.Open('select * from ' + SqlTab);
+      sTxt := QA.FieldByName(TextField).AsString;
+      QA.Close;
+      P.Mode := 0;
+      P.Calls := 0;
+      P.RangeCalls := 0;
+      bTab := RunBoth('select * from ' + SqlTab + ' where ' + TextField + ' = :t order by ' + TextField,
+        sTxt, False, 'testo');
+      if bTab or (P.RangeCalls <> 0) or (P.Calls <> 1) or P.LastAcceptIn or (P.LastProposed <> '') then
+        raise Exception.Create('testo: l''evento doveva arrivare senza proposta e con accettazione False');
+      Write('(testo: gestore chiamato senza proposta, TQuery) ');
+    end;
+
+    // 9) senza gestore: come prima (niente chiamate, nessuna TTable per desc / WHERE senza ORDER BY)
+    C2.OnBDEIndexNeeded := nil;
+    C2.OnBDESetRange := nil;
+    P.Calls := 0;
+    m0 := BDEStatTableCursorOpens;
+    RunBoth('select * from ' + SqlTab + ' order by ' + KeyField + ' desc', Unassigned, True, 'desc senza gestore');
+    if bNum then
+      RunBoth('select * from ' + SqlTab + ' where ' + KeyField + ' = :k', FirstKey, False, 'where senza gestore');
+    if (BDEStatTableCursorOpens <> m0) or (P.Calls <> 0) then
+      raise Exception.Create('senza gestore: comportamento cambiato');
+  finally
+    P.Free;
+    QB.Free;
+    QA.Free;
+    C2.Free;
+  end;
+end;
+
 // Misura: ORDER BY sul campo chiave con TQuery (via driver) contro una TTable del BDE
 // con IndexFieldNames. Serve a decidere se vale la pena usare la TTable per gli ORDER BY.
 procedure TestOrderBy;
@@ -1119,6 +1355,8 @@ begin
       Run('Funzioni escape Local SQL', TestEscapes);
       Run('Parametro TableCursor (select semplici con TTable)', TestTableCursor);
       Run('Costo di lettura: BDE grezzo contro FireDAC', TestFetchCost);
+      if KeyField <> '' then
+        Run('Evento OnBDEIndexNeeded (scelta dell''indice)', TestIndexNeeded);
       if KeyField <> '' then
         Run('Misura ORDER BY: TQuery contro TTable con indice', TestOrderBy);
       if KeyField <> '' then

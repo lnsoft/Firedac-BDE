@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased
+
+- New runtime events `OnBDEIndexNeeded` and `OnBDESetRange` (class helpers on `TFDConnection`, with
+  `TableCursor=True`): the program can choose the index for `ORDER BY` / `WHERE` on a single table (also `DESC`,
+  `WHERE` without `ORDER BY`), set the range itself (text and date conditions included) or reject a query. Without
+  the events nothing changes. `WHERE` conditions may now also compare with text literals. See `docs/TABLECURSOR.md`.
+
 ## 0.1.0 – 2026-10-19
 
 First public release.

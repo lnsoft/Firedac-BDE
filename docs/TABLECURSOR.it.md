@@ -54,6 +54,92 @@ una `TTable` del BDE impiega 0,25 s solo per scorrere il cursore e 2,5 s per leg
 `Variant` o con accessi tipizzati): circa tre quarti del tempo è il BDE che legge i valori; FireDAC e il driver
 aggiungono circa 0,8 s. Leggere solo i campi che servono (`select NUMERO, RIGA, QTA from ...`) riduce il costo in proporzione.
 
+## Scegliere indice e intervallo dal programma: `OnBDEIndexNeeded`, `OnBDESetRange`
+
+Con `TableCursor=True` il driver può chiederti due cose, con eventi opzionali a runtime sulla connessione.
+**Se non ne assegni nessuno non cambia nulla**: decide il driver da solo con le regole sopra. Valgono solo per
+`SELECT` su una sola tabella; join, funzioni e tutto ciò che il parser non riconosce vanno sempre al `TQuery`.
+
+```pascal
+procedure TForm1.FDConnection1AfterConnect(Sender: TObject);
+begin
+  FDConnection1.OnBDEIndexNeeded := IndexNeeded;   // dopo l'apertura della connessione
+  FDConnection1.OnBDESetRange := SetRangeNeeded;
+end;
+
+procedure TForm1.IndexNeeded(Sender: TObject; const ATableName, AFieldNames, ASQL: String;
+  ADescending: Boolean; var AIndexName: String; var AAccept: Boolean);
+begin
+  // AIndexName è la proposta del driver ('' = nessuna); AAccept parte True solo se c'è una proposta
+  if SameText(ATableName, 'ORDINI.DBF') and SameText(AFieldNames, 'CLIENTE;DATA') then begin
+    AIndexName := 'CLIDATA';
+    AAccept := True;
+  end;
+end;
+
+procedure TForm1.SetRangeNeeded(Sender: TObject; ADataSet: TDataSet; const AIndexName: String;
+  const AConditions: TArray<TBDECondition>; var AHandled: Boolean);
+begin
+  // ADataSet è la TTable, già aperta su AIndexName
+  if SameText(AConditions[0].Field, 'CLIENTE') and (AConditions[0].Op = '=') then begin
+    TTable(ADataSet).SetRangeStart;
+    TTable(ADataSet).FieldByName('CLIENTE').AsString := AConditions[0].Value;
+    TTable(ADataSet).SetRangeEnd;
+    TTable(ADataSet).FieldByName('CLIENTE').AsString := AConditions[0].Value;
+    TTable(ADataSet).ApplyRange;
+    AHandled := True;
+  end;
+end;
+```
+
+### `OnBDEIndexNeeded`
+
+Chiamato in preparazione di una `SELECT` che richiede un indice:
+
+| Argomento      | Significato |
+|----------------|-------------|
+| `ATableName`   | tabella del `FROM`, senza virgolette |
+| `AFieldNames`  | i campi dell'`ORDER BY`, separati da `;`; se manca l'`ORDER BY`, i campi del `WHERE` (condizioni semplici unite da `AND`) |
+| `ASQL`         | il testo della SELECT |
+| `ADescending`  | `True` se l'`ORDER BY` è `DESC` (tutti i campi discendenti; direzioni miste non sono mai servite da una `TTable`) |
+| `AIndexName`   | in ingresso: l'indice proposto dal driver, `''` se non ne ha; in uscita: l'indice da usare. `S_BDE_PrimaryIndex` (`'(primary)'`) è la chiave primaria Paradox |
+| `AAccept`      | in ingresso: `True` se il driver ha una proposta, `False` se no; `True` per prendere in carico la query, `False` per farla eseguire al `TQuery` |
+
+Il driver **non ha proposta** (`AIndexName` vuoto, `AAccept = False`) quando non sa servire la query da solo:
+`ORDER BY ... DESC` senza indice discendente, `WHERE` con campi testo o data, e simili. Se non fai nulla la query
+va al `TQuery` come sempre. Per prenderla in carico imposta l'indice **e** `AAccept := True`.
+
+- **`WHERE` senza `ORDER BY`**: con l'indice che indichi, le condizioni sono servite con un `SetRange`. Le righe
+  tornano nell'ordine dell'indice.
+- **Un indice diverso da quello proposto**, anche espressione o insensibile alle maiuscole. Per un indice a campi
+  semplici il driver controlla che i primi campi siano quelli richiesti e che il verso coincida; per un indice
+  espressione (`ixExpression`) il controllo è tuo.
+
+### `OnBDESetRange`
+
+Chiamato all'apertura di una `SELECT` con `WHERE` servita da una `TTable`, dopo che la tabella è aperta
+sull'indice in uso e prima del `SetRange` del driver. `AConditions` ha una voce per condizione (`Field`, `Op` =
+`=`, `>`, `>=`, `<`, `<=`, e `Value`: il valore del parametro, `Null` se NULL, oppure il numero o il testo scritto
+nella SQL).
+
+- Imposta `AHandled := True` dopo aver chiamato tu `SetRangeStart` / `SetRangeEnd` / `ApplyRange`. Il driver non
+  fa altro: **sei tu a garantire che l'intervallo equivalga al `WHERE`**. Così si servono anche condizioni su
+  testo e date (attenzione: un `SetRange` su un campo testo ha semantica di prefisso, e le date vanno convertite).
+- Lascia `AHandled := False` e vale il comportamento standard: il `SetRange` numerico del driver se le condizioni
+  sono numeriche e adatte all'indice, altrimenti il `TQuery`.
+
+Con `OnBDESetRange` assegnato il driver non scarta più in preparazione un `WHERE` su campi testo o data, né le
+condizioni che il suo `SetRange` non sa esprimere; se non le gestisci, la query va al `TQuery` all'apertura.
+Viene accettato anche un indice discendente o espressione con un `WHERE` (l'intervallo è tuo).
+
+### Note
+
+- Un'eccezione sollevata dai tuoi gestori **non** viene assorbita: arriva a chi ha aperto la query.
+- Se `AAccept` è `False`, `AIndexName` è vuoto o sconosciuto, o l'indice non è adatto, la query va al `TQuery`
+  come senza evento.
+- La connessione fisica nasce a ogni `Connected := True`, quindi gli eventi vanno assegnati dopo la connessione
+  (ad esempio in `AfterConnect`). Sono un class helper dichiarato in `FireDAC.Phys.BDEDef`.
+
 ## Differenze rispetto al TQuery
 
 * La TTable è un cursore **vivo**: righe modificate da altri utenti durante la lettura possono comparire; il TQuery lavora su una copia.
