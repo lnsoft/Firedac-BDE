@@ -22,8 +22,9 @@ program BDETest;
 {$APPTYPE CONSOLE}
 
 uses
-  System.SysUtils, System.Classes, System.Diagnostics, System.Variants, System.StrUtils,
-  Data.DB, Bde.DBTables,
+  Winapi.Windows, System.SysUtils, System.Classes, System.Diagnostics, System.Variants,
+  System.StrUtils, System.IOUtils,
+  Data.DB, BDE, Bde.DBTables,
   FireDAC.Stan.Intf, FireDAC.Stan.Option, FireDAC.Stan.Error, FireDAC.Stan.Def,
   FireDAC.Stan.Pool, FireDAC.Stan.Async, FireDAC.Stan.Param, FireDAC.DatS,
   FireDAC.Phys.Intf, FireDAC.Phys, FireDAC.DApt.Intf, FireDAC.DApt,
@@ -878,6 +879,245 @@ begin
   end;
 end;
 
+// ---------------------------------------------------------------------------
+// Visibilita' delle modifiche tra processi. BDETest avvia una copia di se stesso come
+// "scrittore" (--writer <file comandi>): aggiorna un valore, segnala di aver finito e resta
+// CONNESSO finche' il lettore non ha guardato; poi ripristina il valore e termina.
+// Lo scrittore usa sempre il driver; con flush=1 chiama anche DbiSaveChanges.
+function VisPath(const AName: String): String;
+begin
+  Result := TPath.Combine(TPath.GetTempPath, AName);
+end;
+
+procedure RunWriter(const ACmdFile: String);
+var
+  L: TStringList;
+  C: TFDConnection;
+  T: TTable;
+  sFolder, sTab, sSqlTab, sText, sKeyF, sNew, sOrig, sFlush: String;
+  vKey: Double;
+  i: Integer;
+  bChanged: Boolean;
+begin
+  L := TStringList.Create;
+  C := TFDConnection.Create(nil);
+  bChanged := False;
+  sSqlTab := '';
+  sText := '';
+  sKeyF := '';
+  sOrig := '';
+  vKey := 0;
+  try
+    try
+      L.LoadFromFile(ACmdFile, TEncoding.UTF8);
+      sFolder := L[0];
+      sTab := L[1];
+      sSqlTab := L[2];
+      sText := L[3];
+      sKeyF := L[4];
+      vKey := StrToFloat(L[5], TFormatSettings.Invariant);
+      sNew := L[6];
+      sOrig := L[7];
+      sFlush := L[8];
+      C.DriverName := 'BDE';
+      C.LoginPrompt := False;
+      C.Params.Database := sFolder;
+      C.Open;
+      bChanged := True;
+      C.ExecSQL('update ' + sSqlTab + ' set ' + sText + ' = :v where ' + sKeyF + ' = :k',
+        [sNew, vKey]);
+      if sFlush = '1' then begin
+        T := TTable.Create(nil);
+        try
+          T.DatabaseName := TDatabase(C.CliObj).DatabaseName;
+          T.SessionName := TDatabase(C.CliObj).SessionName;
+          T.TableName := sTab;
+          T.Open;
+          Check(DbiSaveChanges(T.Handle));
+          T.Close;
+        finally
+          T.Free;
+        end;
+      end;
+      TFile.WriteAllText(VisPath('fdbde_vis_done.txt'), 'ok');
+      for i := 1 to 1200 do
+        if TFile.Exists(VisPath('fdbde_vis_stop.txt')) then
+          Break
+        else
+          Sleep(50);
+    except
+      on E: Exception do
+        TFile.WriteAllText(VisPath('fdbde_vis_error.txt'), E.Message);
+    end;
+  finally
+    if bChanged then
+      try
+        C.ExecSQL('update ' + sSqlTab + ' set ' + sText + ' = :v where ' + sKeyF + ' = :k',
+          [sOrig, vKey]);
+      except
+      end;
+    C.Free;
+    L.Free;
+  end;
+end;
+
+procedure TestVisibility;
+var
+  RC, R2: TFDConnection;
+  QR, QX, QT: TFDQuery;
+  sSql, sOrig, sNew, sSame, sRef, sNewQ, sNewC, sTQ: String;
+  vKey: Double;
+  L: TStringList;
+  SI: TStartupInfo;
+  PI: TProcessInformation;
+  sCmd: String;
+  fl, i: Integer;
+  bUp: Boolean;
+
+  function First(AQ: TFDQuery): String;
+  begin
+    if AQ.Eof then
+      Result := '(nessuna riga)'
+    else
+      Result := AQ.FieldByName(TextField).AsString;
+  end;
+
+  function Sees(const AValue: String): String;
+  begin
+    if Trim(AValue) = Trim(sNew) then
+      Result := 'VEDE'
+    else if Trim(AValue) = Trim(sOrig) then
+      Result := 'non vede'
+    else
+      Result := 'valore inatteso "' + AValue + '"';
+  end;
+
+begin
+  if not ((not VarIsNull(FirstKey)) and (not VarIsEmpty(FirstKey)) and VarIsNumeric(FirstKey)) then begin
+    Write('(saltato: serve una chiave numerica) ');
+    Exit;
+  end;
+  vKey := FirstKey;
+  sSql := 'select * from ' + SqlTab + ' where ' + KeyField + ' = :k order by ' + KeyField;
+  RC := TFDConnection.Create(nil);
+  R2 := TFDConnection.Create(nil);
+  QR := TFDQuery.Create(nil);
+  QX := TFDQuery.Create(nil);
+  QT := TFDQuery.Create(nil);
+  L := TStringList.Create;
+  try
+    RC.DriverName := 'BDE';
+    RC.LoginPrompt := False;
+    RC.Params.Database := Folder;
+    RC.Params.Values['TableCursor'] := 'True';
+    RC.Open;
+    QR.Connection := RC;
+    QX.Connection := RC;
+    QT.Connection := Conn;
+    for fl := 0 to 1 do begin
+      System.SysUtils.DeleteFile(VisPath('fdbde_vis_done.txt'));
+      System.SysUtils.DeleteFile(VisPath('fdbde_vis_stop.txt'));
+      System.SysUtils.DeleteFile(VisPath('fdbde_vis_error.txt'));
+      QR.Close;
+      QR.Open(sSql, [vKey]);
+      sOrig := First(QR);
+      if Length(Trim(sOrig)) > 0 then begin
+        if sOrig[1] = '#' then
+          sNew := '$' + Copy(sOrig, 2, Length(sOrig))
+        else
+          sNew := '#' + Copy(sOrig, 2, Length(sOrig));
+      end
+      else
+        sNew := '#';
+      L.Clear;
+      L.Add(Folder);
+      L.Add(TabName);
+      L.Add(SqlTab);
+      L.Add(TextField);
+      L.Add(KeyField);
+      L.Add(FloatToStr(vKey, TFormatSettings.Invariant));
+      L.Add(sNew);
+      L.Add(sOrig);
+      L.Add(IntToStr(fl));
+      L.SaveToFile(VisPath('fdbde_vis_cmd.txt'), TEncoding.UTF8);
+      FillChar(SI, SizeOf(SI), 0);
+      SI.cb := SizeOf(SI);
+      sCmd := '"' + ParamStr(0) + '" --writer "' + VisPath('fdbde_vis_cmd.txt') + '"';
+      UniqueString(sCmd);
+      if not CreateProcess(nil, PChar(sCmd), nil, nil, False, 0, nil, nil, SI, PI) then
+        RaiseLastOSError;
+      try
+        // attesa che lo scrittore abbia aggiornato (restando connesso)
+        bUp := False;
+        for i := 1 to 300 do begin
+          if TFile.Exists(VisPath('fdbde_vis_done.txt')) then begin
+            bUp := True;
+            Break;
+          end;
+          if TFile.Exists(VisPath('fdbde_vis_error.txt')) or
+             (WaitForSingleObject(PI.hProcess, 100) = WAIT_OBJECT_0) then
+            Break;
+        end;
+        if not bUp then begin
+          if TFile.Exists(VisPath('fdbde_vis_error.txt')) then
+            raise Exception.Create('scrittore: ' + TFile.ReadAllText(VisPath('fdbde_vis_error.txt')))
+          else
+            raise Exception.Create('lo scrittore non ha completato l''aggiornamento');
+        end;
+        // il lettore guarda, con lo scrittore ancora connesso
+        sSame := First(QR);                       // stessa query, senza fare nulla
+        QR.Refresh;
+        sRef := First(QR);                        // stessa query dopo Refresh
+        QX.Close;
+        QX.Open(sSql, [vKey]);
+        sNewQ := First(QX);                       // query nuova, stessa connessione
+        QX.Close;
+        R2.DriverName := 'BDE';
+        R2.LoginPrompt := False;
+        R2.Params.Database := Folder;
+        R2.Params.Values['TableCursor'] := 'True';
+        R2.Open;
+        QX.Connection := R2;
+        QX.Open(sSql, [vKey]);
+        sNewC := First(QX);                       // connessione nuova
+        QX.Close;
+        R2.Close;
+        QX.Connection := RC;
+        QT.Open(sSql, [vKey]);
+        sTQ := First(QT);                         // TQuery (senza TableCursor)
+        QT.Close;
+        Write('(scrittore ', IfThen(fl = 0, 'senza flush', 'con DbiSaveChanges'), ', ancora connesso: ',
+          'stessa query aperta ', Sees(sSame), '; dopo Refresh ', Sees(sRef),
+          '; query nuova ', Sees(sNewQ), '; connessione nuova ', Sees(sNewC),
+          '; TQuery ', Sees(sTQ), ') ');
+      finally
+        TFile.WriteAllText(VisPath('fdbde_vis_stop.txt'), 'stop');
+        WaitForSingleObject(PI.hProcess, 30000);
+        CloseHandle(PI.hProcess);
+        CloseHandle(PI.hThread);
+      end;
+      // controllo del ripristino del valore originale
+      QT.Open(sSql, [vKey]);
+      try
+        if Trim(First(QT)) <> Trim(sOrig) then begin
+          Conn.ExecSQL('update ' + SqlTab + ' set ' + TextField + ' = :v where ' + KeyField + ' = :k',
+            [sOrig, vKey]);
+          raise Exception.Create('il valore non e'' stato ripristinato dallo scrittore (ripristinato dal test)');
+        end;
+      finally
+        QT.Close;
+      end;
+    end;
+  finally
+    L.Free;
+    QT.Free;
+    QX.Free;
+    QR.Free;
+    R2.Free;
+    RC.Free;
+  end;
+end;
+
 // Misura: ORDER BY sul campo chiave con TQuery (via driver) contro una TTable del BDE
 // con IndexFieldNames. Serve a decidere se vale la pena usare la TTable per gli ORDER BY.
 procedure TestOrderBy;
@@ -1484,6 +1724,11 @@ begin
 end;
 
 begin
+  // processo "scrittore" avviato da TestVisibility
+  if (ParamCount >= 2) and SameText(ParamStr(1), '--writer') then begin
+    RunWriter(ParamStr(2));
+    Halt(0);
+  end;
   if ParamCount < 2 then begin
     Writeln('Uso: BDETest <cartella o alias BDE> <tabella> [campo chiave] [campo testo] [campo memo]');
     Halt(1);
@@ -1530,6 +1775,8 @@ begin
         Run('Evento OnBDEIndexNeeded (scelta dell''indice)', TestIndexNeeded);
       if KeyField <> '' then
         Run('Misura costi: count(*), Prepare, riapertura nel master-detail', TestCostProbe);
+      if (KeyField <> '') and (TextField <> '') then
+        Run('Visibilita'' delle modifiche tra processi (scrive: usare una COPIA)', TestVisibility);
       if KeyField <> '' then
         Run('Misura ORDER BY: TQuery contro TTable con indice', TestOrderBy);
       if KeyField <> '' then
