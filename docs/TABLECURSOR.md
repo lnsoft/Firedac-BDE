@@ -146,6 +146,28 @@ it is opened. A descending or expression index is also accepted with a `WHERE` (
 * A field that is a Local SQL reserved word (for example `AUTOINC`) works through the TTable, while the TQuery rejects it.
 * If a parameter of a `WHERE` is NULL or not numeric when the query is opened, the driver switches to the TQuery for that command.
 
+## Seeing other users' changes
+
+A `TFDQuery` keeps the rows it has fetched in memory, so a change made by another process or connection is not
+shown in a result that is already open: it needs a refresh. Measured with a writer in a **separate process** that
+updates a row and stays connected (dBase table on a local disk), with and without a `DbiSaveChanges` on its side:
+
+| Reader                                   | Sees the change? |
+|------------------------------------------|------------------|
+| the same open query, doing nothing       | no (rows already fetched) |
+| the same query after `Refresh`           | yes |
+| a new query on the same connection       | yes |
+| a new connection                         | yes |
+| a plain `TQuery` (no `TableCursor`)      | yes |
+
+So the BDE does not hold the change back (no flush is needed on the writing side): a reopen is enough. With
+`TableCursor=True` a reopen costs milliseconds (`TFDTable.Open` 12 ms; `select *` 7 ms instead of 3.4 s), so
+`Refresh` is practically free; with the `TQuery` it costs as much as the first open. To refresh a single row use
+`RefreshRecord` with `UpdateOptions.KeyFields` (served by the index, about 10 ms). There is no change notification
+in the BDE: if you need to know when to refresh, poll the modification time of the table file.
+
+The figures above are for a local disk; on a network share the client cache of the share can delay the change.
+
 ## Check what happened
 
 `BDETest` has a case that runs every shape above on a normal and on a `TableCursor=True` connection, compares keys

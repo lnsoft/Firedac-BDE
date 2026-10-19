@@ -148,6 +148,30 @@ Viene accettato anche un indice discendente o espressione con un `WHERE` (l'inte
 * Un campo che è parola riservata del Local SQL (per esempio `AUTOINC`) funziona con la TTable, mentre il TQuery lo rifiuta.
 * Se un parametro del `WHERE` è NULL o non numerico quando la query viene aperta, il driver passa al TQuery per quel comando.
 
+## Vedere le modifiche degli altri utenti
+
+Un `TFDQuery` tiene in memoria le righe lette, quindi una modifica fatta da un altro processo o da un'altra
+connessione non compare in un risultato già aperto: serve un aggiornamento. Misurato con uno scrittore in un
+**processo separato** che modifica una riga e resta connesso (tabella dBase su disco locale), con e senza un
+`DbiSaveChanges` da parte sua:
+
+| Lettore                                   | Vede la modifica? |
+|-------------------------------------------|-------------------|
+| la stessa query aperta, senza fare nulla  | no (righe già lette) |
+| la stessa query dopo `Refresh`            | sì |
+| una query nuova sulla stessa connessione  | sì |
+| una connessione nuova                     | sì |
+| un normale `TQuery` (senza `TableCursor`) | sì |
+
+Quindi il BDE non trattiene la modifica (non serve nessun flush lato scrittore): basta riaprire. Con
+`TableCursor=True` la riapertura costa millisecondi (`TFDTable.Open` 12 ms; `select *` 7 ms invece di 3,4 s),
+quindi il `Refresh` è praticamente gratuito; con il `TQuery` costa quanto la prima apertura. Per aggiornare una
+sola riga usa `RefreshRecord` con `UpdateOptions.KeyFields` (servito dall'indice, circa 10 ms). Il BDE non ha
+notifiche di modifica: se ti serve sapere quando aggiornare, controlla a intervalli la data di modifica del file
+della tabella.
+
+Le misure sono su disco locale; su una condivisione di rete la cache del client può ritardare la modifica.
+
 ## Verifica
 
 `BDETest` ha un caso che esegue ogni forma qui sopra su una connessione normale e su una con `TableCursor=True`,
