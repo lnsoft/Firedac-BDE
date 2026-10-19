@@ -545,6 +545,9 @@ var
     m0, nA, nB: Integer;
   begin
     if VarIsEmpty(AParam) then QA.Open(ASQL) else QA.Open(ASQL, [AParam]);
+    // la scelta dell'indice avviene in Prepare: con lo stesso testo SQL FireDAC non
+    // ripreparerebbe il comando, quindi si parte sempre da non preparato
+    QB.Unprepare;
     m0 := BDEStatTableCursorOpens;
     try
       if VarIsEmpty(AParam) then QB.Open(ASQL) else QB.Open(ASQL, [AParam]);
@@ -641,6 +644,7 @@ begin
     // 6) un errore del gestore si propaga (non viene scambiato per "query non gestita")
     P.Mode := 3;
     bRaised := False;
+    QB.Unprepare;
     try
       QB.Open('select * from ' + SqlTab + ' order by ' + KeyField);
     except
@@ -703,6 +707,173 @@ begin
     P.Free;
     QB.Free;
     QA.Free;
+    C2.Free;
+  end;
+end;
+
+// Misura (non verifica): dove si potrebbe ancora guadagnare con TableCursor.
+//  A) count(*): TQuery contro TTable.RecordCount (anche con un intervallo sulla chiave)
+//  B) costo di Prepare: creare TTable + FieldDefs/IndexDefs, a mano e tramite il driver
+//  C) master-detail: N aperture con parametro, TQuery contro driver con TableCursor contro
+//     TTable BDE gia' aperta (solo SetRange) contro TTable chiusa e riaperta a ogni volta
+procedure TestCostProbe;
+const
+  N = 300;
+  SOME = 20;
+var
+  C2: TFDConnection;
+  Q, QB: TFDQuery;
+  T, T2: TTable;
+  SW: TStopwatch;
+  i, nQ, nT, nRows: Integer;
+  msQ, msT, ms1, ms2, ms3, ms4, ms5, ms6: Int64;
+  bNum: Boolean;
+
+  function ReadSome(ADS: TDataSet): Integer;
+  begin
+    Result := 0;
+    while (not ADS.Eof) and (Result < SOME) do begin
+      Inc(Result);
+      ADS.Next;
+    end;
+  end;
+
+  procedure SetKeyRange(ATab: TTable; const AValue: Variant);
+  begin
+    ATab.SetRangeStart;
+    ATab.FieldByName(KeyField).Value := AValue;
+    ATab.SetRangeEnd;
+    ATab.FieldByName(KeyField).Value := AValue;
+    ATab.ApplyRange;
+  end;
+
+begin
+  bNum := (not VarIsNull(FirstKey)) and (not VarIsEmpty(FirstKey)) and VarIsNumeric(FirstKey);
+  C2 := TFDConnection.Create(nil);
+  Q := TFDQuery.Create(nil);
+  QB := TFDQuery.Create(nil);
+  T := TTable.Create(nil);
+  try
+    C2.DriverName := 'BDE';
+    C2.LoginPrompt := False;
+    C2.Params.Database := Folder;
+    C2.Params.Values['TableCursor'] := 'True';
+    C2.Open;
+    Q.Connection := Conn;
+    QB.Connection := C2;
+    T.DatabaseName := Folder;
+    T.TableName := TabName;
+    T.ReadOnly := True;
+    T.IndexFieldNames := KeyField;
+
+    // A) count(*) sull'intera tabella
+    SW := TStopwatch.StartNew;
+    Q.Open('select count(*) from ' + SqlTab);
+    nQ := Q.Fields[0].AsInteger;
+    Q.Close;
+    msQ := SW.ElapsedMilliseconds;
+    SW := TStopwatch.StartNew;
+    T.Open;
+    nT := T.RecordCount;
+    msT := SW.ElapsedMilliseconds;
+    Write('(count(*): TQuery ', msQ, ' ms = ', nQ, '; TTable.RecordCount ', msT, ' ms = ', nT,
+      IfThen(nQ = nT, ', uguali', ', DIVERSI (record cancellati?)'), ') ');
+    if bNum then begin
+      // count(*) con intervallo sulla chiave (>=): TQuery contro SetRange + RecordCount
+      SW := TStopwatch.StartNew;
+      Q.Open('select count(*) from ' + SqlTab + ' where ' + KeyField + ' >= :k', [FirstKey]);
+      nQ := Q.Fields[0].AsInteger;
+      Q.Close;
+      msQ := SW.ElapsedMilliseconds;
+      SW := TStopwatch.StartNew;
+      T.SetRangeStart;
+      T.FieldByName(KeyField).Value := FirstKey;
+      T.ApplyRange;
+      nT := T.RecordCount;
+      T.CancelRange;
+      msT := SW.ElapsedMilliseconds;
+      Write('(count(*) con ', KeyField, ' >= chiave: TQuery ', msQ, ' ms = ', nQ,
+        '; TTable ', msT, ' ms = ', nT, IfThen(nQ = nT, ', uguali', ', DIVERSI'), ') ');
+    end;
+    T.Close;
+
+    // B) costo di Prepare
+    SW := TStopwatch.StartNew;
+    for i := 1 to N do begin
+      T2 := TTable.Create(nil);
+      try
+        T2.DatabaseName := Folder;
+        T2.TableName := TabName;
+        T2.ReadOnly := True;
+        T2.FieldDefs.Update;
+        T2.IndexDefs.Update;
+      finally
+        T2.Free;
+      end;
+    end;
+    ms1 := SW.ElapsedMilliseconds;
+    QB.SQL.Text := 'select * from ' + SqlTab + ' order by ' + KeyField;
+    SW := TStopwatch.StartNew;
+    for i := 1 to N do begin
+      QB.Prepare;
+      QB.Unprepare;
+    end;
+    ms2 := SW.ElapsedMilliseconds;
+    Write('(', N, ' preparazioni: TTable+FieldDefs+IndexDefs a mano ', ms1, ' ms; Prepare del driver ',
+      ms2, ' ms) ');
+
+    // C) master-detail: N aperture con parametro
+    if bNum then begin
+      Q.SQL.Text := 'select * from ' + SqlTab + ' where ' + KeyField + ' = :k order by ' + KeyField;
+      Q.Prepare;
+      Q.Params[0].Value := FirstKey;
+      SW := TStopwatch.StartNew;
+      for i := 1 to N do begin
+        Q.Open;
+        ReadSome(Q);
+        Q.Close;
+      end;
+      ms3 := SW.ElapsedMilliseconds;
+
+      QB.SQL.Text := Q.SQL.Text;
+      QB.Prepare;
+      QB.Params[0].Value := FirstKey;
+      SW := TStopwatch.StartNew;
+      for i := 1 to N do begin
+        QB.Open;
+        ReadSome(QB);
+        QB.Close;
+      end;
+      ms4 := SW.ElapsedMilliseconds;
+
+      T.Open;
+      SW := TStopwatch.StartNew;
+      for i := 1 to N do begin
+        SetKeyRange(T, FirstKey);
+        T.First;
+        nRows := ReadSome(T);
+      end;
+      ms5 := SW.ElapsedMilliseconds;
+      T.Close;
+
+      SW := TStopwatch.StartNew;
+      for i := 1 to N do begin
+        T.Close;
+        T.Open;
+        SetKeyRange(T, FirstKey);
+        T.First;
+        nRows := ReadSome(T);
+      end;
+      ms6 := SW.ElapsedMilliseconds;
+      T.Close;
+      Write('(', N, ' aperture con parametro, prime ', SOME, ' righe (', nRows, ' lette): TQuery ', ms3,
+        ' ms; driver con TableCursor ', ms4, ' ms; TTable gia'' aperta + SetRange ', ms5,
+        ' ms; TTable chiusa e riaperta ', ms6, ' ms) ');
+    end;
+  finally
+    T.Free;
+    QB.Free;
+    Q.Free;
     C2.Free;
   end;
 end;
@@ -1357,6 +1528,8 @@ begin
       Run('Costo di lettura: BDE grezzo contro FireDAC', TestFetchCost);
       if KeyField <> '' then
         Run('Evento OnBDEIndexNeeded (scelta dell''indice)', TestIndexNeeded);
+      if KeyField <> '' then
+        Run('Misura costi: count(*), Prepare, riapertura nel master-detail', TestCostProbe);
       if KeyField <> '' then
         Run('Misura ORDER BY: TQuery contro TTable con indice', TestOrderBy);
       if KeyField <> '' then
