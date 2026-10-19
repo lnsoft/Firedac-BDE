@@ -4,7 +4,8 @@
 
 - New connection parameter `TableCursor` (default `False`): plain `select * from TAB` / `select fields from TAB`
   are read through a BDE `TTable` (immediate open on large tables) instead of a `TQuery`. Other SELECTs are unchanged.
-  Measured motivation: opening a 452,873-row DBF takes 3.4 s with `TQuery`, 1 ms with `TTable`.
+  Also `ORDER BY` (ascending) on the leading fields of a plain index. Measured on a 452,873-row DBF:
+  `select *` opens in 3.5 s with `TQuery`, 7 ms with `TTable`; `order by` an indexed field 2.2 s vs 16 ms.
 
 ## 0.1.0 – 2026-10-16
 

@@ -144,18 +144,22 @@ type
 // Qualsiasi altra cosa (WHERE, ORDER BY, JOIN, alias, funzioni, parametri...) non
 // corrisponde e resta al TQuery.
 function ParseSimpleSelect(const ASQL: String; out ATable: String;
-  out ACols: TArray<String>): Boolean;
+  out ACols, AOrder: TArray<String>): Boolean;
 const
-  C_Pattern = '^\s*SELECT\s+(\*|\w+(?:\s*,\s*\w+)*)\s+FROM\s+("[^"]+"|[\w$.]+)\s*;?\s*$';
+  C_Pattern = '^\s*SELECT\s+(\*|\w+(?:\s*,\s*\w+)*)\s+FROM\s+("[^"]+"|[\w$.]+)' +
+    '(?:\s+ORDER\s+BY\s+(\w+(?:\s+ASC)?(?:\s*,\s*\w+(?:\s+ASC)?)*))?\s*;?\s*$';
 var
   oM: TMatch;
   oMC: TMatchCollection;
+  oI: TMatch;
   i: Integer;
   s: String;
+  aItems: TArray<String>;
 begin
   Result := False;
   ATable := '';
   SetLength(ACols, 0);
+  SetLength(AOrder, 0);
   oM := TRegEx.Match(ASQL, C_Pattern, [roIgnoreCase]);
   if not oM.Success then
     Exit;
@@ -168,6 +172,17 @@ begin
     SetLength(ACols, oMC.Count);
     for i := 0 to oMC.Count - 1 do
       ACols[i] := oMC[i].Value;
+  end;
+  // ORDER BY solo crescente (ASC facoltativo): il DESC resta al TQuery
+  if (oM.Groups.Count > 3) and oM.Groups[3].Success then begin
+    aItems := oM.Groups[3].Value.Split([',']);
+    SetLength(AOrder, Length(aItems));
+    for i := 0 to High(aItems) do begin
+      oI := TRegEx.Match(Trim(aItems[i]), '^(\w+)(?:\s+ASC)?$', [roIgnoreCase]);
+      if not oI.Success then
+        Exit;
+      AOrder[i] := oI.Groups[1].Value;
+    end;
   end;
   Result := True;
 end;
@@ -525,17 +540,19 @@ end;
 
 function TFDPhysBDECommand.TryPrepareTable: Boolean;
 var
-  sTab: String;
-  aCols: TArray<String>;
+  sTab, sIdx: String;
+  aCols, aOrder, aF: TArray<String>;
   oTab: TTable;
-  i: Integer;
+  oDef: TIndexDef;
+  i, k: Integer;
+  bFound, bOk: Boolean;
 begin
   Result := False;
   if GetCommandKind <> skSelect then
     Exit;
   if (GetParams <> nil) and (GetParams.Count > 0) then
     Exit;
-  if not ParseSimpleSelect(FDbCommandText, sTab, aCols) then
+  if not ParseSimpleSelect(FDbCommandText, sTab, aCols, aOrder) then
     Exit;
   oTab := TTable.Create(nil);
   try
@@ -548,6 +565,38 @@ begin
       for i := 0 to High(aCols) do      // e contenere i campi richiesti
         if oTab.FieldDefs.IndexOf(aCols[i]) < 0 then
           raise Exception.Create('campo non trovato: ' + aCols[i]);
+      if Length(aOrder) > 0 then begin
+        // ORDER BY: serve un indice sui campi semplici, nello stesso ordine
+        // (escluso: espressioni, discendenti, senza distinzione maiuscole/minuscole)
+        for i := 0 to High(aOrder) do
+          if oTab.FieldDefs.IndexOf(aOrder[i]) < 0 then
+            raise Exception.Create('campo non trovato: ' + aOrder[i]);
+        oTab.IndexDefs.Update;
+        bFound := False;
+        sIdx := '';
+        for i := 0 to oTab.IndexDefs.Count - 1 do begin
+          oDef := oTab.IndexDefs[i];
+          if oDef.Options * [ixExpression, ixDescending, ixCaseInsensitive] <> [] then
+            Continue;
+          aF := oDef.Fields.Split([';']);
+          if Length(aF) < Length(aOrder) then
+            Continue;
+          bOk := True;
+          for k := 0 to High(aOrder) do
+            if not SameText(Trim(aF[k]), aOrder[k]) then begin
+              bOk := False;
+              Break;
+            end;
+          if bOk then begin
+            sIdx := oDef.Name;
+            bFound := True;
+            Break;
+          end;
+        end;
+        if not bFound then
+          raise Exception.Create('nessun indice per l''ORDER BY');
+        oTab.IndexName := sIdx;
+      end;
     except
       // qualsiasi dubbio: si torna al TQuery, che riporta l'errore corretto
       FDFree(oTab);

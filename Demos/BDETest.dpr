@@ -23,7 +23,7 @@ program BDETest;
 
 uses
   System.SysUtils, System.Classes, System.Diagnostics, System.Variants, System.StrUtils,
-  Data.DB,
+  Data.DB, Bde.DBTables,
   FireDAC.Stan.Intf, FireDAC.Stan.Option, FireDAC.Stan.Error, FireDAC.Stan.Def,
   FireDAC.Stan.Pool, FireDAC.Stan.Async, FireDAC.Stan.Param, FireDAC.DatS,
   FireDAC.Phys.Intf, FireDAC.Phys, FireDAC.DApt.Intf, FireDAC.DApt,
@@ -227,6 +227,8 @@ var
   C2: TFDConnection;
   QA, QB: TFDQuery;
   sF0, sF1: String;
+  n, n0, n1: Integer;
+  bTab: Boolean;
 
   procedure Cmp(const ASQL, ALabel: String; AExpectTable: Boolean;
     const AParam: Variant);
@@ -311,6 +313,44 @@ begin
     if (KeyField <> '') and not VarIsNull(FirstKey) and not VarIsEmpty(FirstKey) then
       Cmp('select * from ' + SqlTab + ' where ' + KeyField + ' = :k',
         'con WHERE (resta TQuery)', False, FirstKey);
+    // ORDER BY sulla chiave: con indice usa la TTable; l'ordine della chiave deve coincidere
+    // (tra righe con la stessa chiave l'ordine non e' definito: si confronta solo la chiave)
+    if KeyField <> '' then begin
+      n0 := BDEStatTableCursorOpens;
+      QA.Open('select * from ' + SqlTab + ' order by ' + KeyField);
+      n1 := BDEStatTableCursorOpens;
+      QB.Open('select * from ' + SqlTab + ' order by ' + KeyField);
+      bTab := BDEStatTableCursorOpens > n1;
+      try
+        if n1 <> n0 then
+          raise Exception.Create('order by: senza TableCursor non deve usare la TTable');
+        n := 0;
+        while (not QA.Eof) and (not QB.Eof) and (n < 5000) do begin
+          if QA.FieldByName(KeyField).AsString <> QB.FieldByName(KeyField).AsString then
+            raise Exception.CreateFmt('order by %s: riga %d, chiave diversa (%s / %s)',
+              [KeyField, n + 1, QA.FieldByName(KeyField).AsString,
+               QB.FieldByName(KeyField).AsString]);
+          Inc(n);
+          QA.Next;
+          QB.Next;
+        end;
+        Write('(order by ', KeyField, ': ', n, ' chiavi uguali, ',
+          IfThen(bTab, 'TTable', 'TQuery (nessun indice adatto)'), ') ');
+      finally
+        QA.Close;
+        QB.Close;
+      end;
+      // DESC resta al TQuery
+      n1 := BDEStatTableCursorOpens;
+      QB.Open('select * from ' + SqlTab + ' order by ' + KeyField + ' desc');
+      try
+        if BDEStatTableCursorOpens <> n1 then
+          raise Exception.Create('order by desc non deve usare la TTable');
+        Write('(order by desc: resta TQuery) ');
+      finally
+        QB.Close;
+      end;
+    end;
     // scrittura nella stessa connessione mentre la TTable e' aperta
     if (TextField <> '') and (KeyField <> '') and not VarIsNull(FirstKey) then begin
       QB.Open('select * from ' + SqlTab);
@@ -329,6 +369,66 @@ begin
     QB.Free;
     QA.Free;
     C2.Free;
+  end;
+end;
+
+// Misura: ORDER BY sul campo chiave con TQuery (via driver) contro una TTable del BDE
+// con IndexFieldNames. Serve a decidere se vale la pena usare la TTable per gli ORDER BY.
+procedure TestOrderBy;
+var
+  QA: TFDQuery;
+  T: TTable;
+  SW: TStopwatch;
+  msA, msB: Int64;
+  n, j, nKey, nRow: Integer;
+  sFld: String;
+begin
+  QA := TFDQuery.Create(nil);
+  T := TTable.Create(nil);
+  try
+    QA.Connection := Conn;
+    SW := TStopwatch.StartNew;
+    QA.Open('select * from ' + SqlTab + ' order by ' + KeyField);
+    msA := SW.ElapsedMilliseconds;
+    T.DatabaseName := Folder;
+    T.TableName := TabName;
+    T.ReadOnly := True;
+    T.IndexFieldNames := KeyField;
+    SW := TStopwatch.StartNew;
+    try
+      T.Open;
+    except
+      on E: EDBEngineError do begin
+        Write('(order by ', KeyField, ': TQuery ', msA, ' ms; TTable non applicabile: ',
+          Copy(E.Message, 1, 80), ') ');
+        Exit;
+      end;
+    end;
+    msB := SW.ElapsedMilliseconds;
+    n := 0;
+    nKey := 0;
+    nRow := 0;
+    while (not QA.Eof) and (not T.Eof) and (n < 5000) do begin
+      if QA.FieldByName(KeyField).AsString <> T.FieldByName(KeyField).AsString then
+        Inc(nKey);
+      for j := 0 to QA.FieldCount - 1 do begin
+        sFld := QA.Fields[j].FieldName;
+        if QA.Fields[j].AsString <> T.FieldByName(sFld).AsString then begin
+          Inc(nRow);
+          Break;
+        end;
+      end;
+      Inc(n);
+      QA.Next;
+      T.Next;
+    end;
+    Write('(order by ', KeyField, ': TQuery ', msA, ' ms, TTable ', msB, ' ms; prime ', n,
+      ' righe: chiave diversa ', nKey, ', riga diversa ', nRow, ') ');
+    if nKey > 0 then
+      raise Exception.Create('Ordine diverso tra TQuery e TTable');
+  finally
+    T.Free;
+    QA.Free;
   end;
 end;
 
@@ -750,6 +850,8 @@ begin
       Run('TFDTable e Locate', TestTable);
       Run('Funzioni escape Local SQL', TestEscapes);
       Run('Parametro TableCursor (select semplici con TTable)', TestTableCursor);
+      if KeyField <> '' then
+        Run('Misura ORDER BY: TQuery contro TTable con indice', TestOrderBy);
       if TextField <> '' then
         Run('Scrittura con rollback', TestWrite);
       if KeyField <> '' then
