@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+- New connection parameter `TableCursor` (default `False`): plain `select * from TAB` / `select fields from TAB`
+  are read through a BDE `TTable` (immediate open on large tables) instead of a `TQuery`. Other SELECTs are unchanged.
+  Measured motivation: opening a 452,873-row DBF takes 3.4 s with `TQuery`, 1 ms with `TTable`.
+
 ## 0.1.0 – 2026-10-16
 
 First public release.

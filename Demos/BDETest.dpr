@@ -22,7 +22,7 @@ program BDETest;
 {$APPTYPE CONSOLE}
 
 uses
-  System.SysUtils, System.Classes, System.Diagnostics, System.Variants,
+  System.SysUtils, System.Classes, System.Diagnostics, System.Variants, System.StrUtils,
   Data.DB,
   FireDAC.Stan.Intf, FireDAC.Stan.Option, FireDAC.Stan.Error, FireDAC.Stan.Def,
   FireDAC.Stan.Pool, FireDAC.Stan.Async, FireDAC.Stan.Param, FireDAC.DatS,
@@ -219,6 +219,116 @@ begin
       raise Exception.Create('count(*) e righe lette non coincidono');
   finally
     Q.Free;
+  end;
+end;
+
+procedure TestTableCursor;
+var
+  C2: TFDConnection;
+  QA, QB: TFDQuery;
+  sF0, sF1: String;
+
+  procedure Cmp(const ASQL, ALabel: String; AExpectTable: Boolean;
+    const AParam: Variant);
+  var
+    SW: TStopwatch;
+    j, n: Integer;
+    msA, msB: Int64;
+    n0, n1: Integer;
+    bTable: Boolean;
+  begin
+    n0 := BDEStatTableCursorOpens;
+    SW := TStopwatch.StartNew;
+    if VarIsEmpty(AParam) then QA.Open(ASQL) else QA.Open(ASQL, [AParam]);
+    msA := SW.ElapsedMilliseconds;
+    n1 := BDEStatTableCursorOpens;
+    SW := TStopwatch.StartNew;
+    if VarIsEmpty(AParam) then QB.Open(ASQL) else QB.Open(ASQL, [AParam]);
+    msB := SW.ElapsedMilliseconds;
+    bTable := BDEStatTableCursorOpens > n1;
+    try
+      if n1 <> n0 then
+        raise Exception.Create('Senza TableCursor la query non deve usare la TTable');
+      if bTable <> AExpectTable then
+        raise Exception.Create(ALabel + ': uso della TTable diverso dall''atteso (atteso ' +
+          BoolToStr(AExpectTable, True) + ')');
+      if QA.FieldCount <> QB.FieldCount then
+        raise Exception.Create(ALabel + ': numero di campi diverso');
+      n := 0;
+      while (not QA.Eof) and (not QB.Eof) and (n < 5000) do begin
+        for j := 0 to QA.FieldCount - 1 do
+          if QA.Fields[j].AsString <> QB.Fields[j].AsString then
+            raise Exception.CreateFmt('%s: riga %d, campo %s diverso (TQuery "%s" %s, TTable "%s" %s; campi TQuery: %s, TTable: %s)',
+              [ALabel, n + 1, QA.Fields[j].FieldName,
+               QA.Fields[j].AsString, FieldTypeNames[QA.Fields[j].DataType],
+               QB.Fields[j].AsString, FieldTypeNames[QB.Fields[j].DataType],
+               QA.Fields[0].FieldName + '/' + QA.Fields[QA.FieldCount - 1].FieldName,
+               QB.Fields[0].FieldName + '/' + QB.Fields[QB.FieldCount - 1].FieldName]);
+        Inc(n);
+        QA.Next;
+        QB.Next;
+      end;
+      if (n < 5000) and (QA.Eof <> QB.Eof) then
+        raise Exception.Create(ALabel + ': numero di righe diverso');
+      Write('(', ALabel, ': ', n, ' righe uguali; TQuery ', msA, ' ms, ',
+        IfThen(bTable, 'TTable ', 'TQuery '), msB, ' ms) ');
+    finally
+      QA.Close;
+      QB.Close;
+    end;
+  end;
+
+begin
+  C2 := TFDConnection.Create(nil);
+  QA := TFDQuery.Create(nil);
+  QB := TFDQuery.Create(nil);
+  try
+    C2.DriverName := 'BDE';
+    C2.LoginPrompt := False;
+    C2.Params.Database := Folder;
+    C2.Params.Values['TableCursor'] := 'True';
+    C2.Open;
+    QA.Connection := Conn;
+    QB.Connection := C2;
+    QA.Open('select * from ' + SqlTab);
+    sF0 := QA.Fields[0].FieldName;
+    sF1 := sF0;
+    if QA.FieldCount > 1 then
+      sF1 := QA.Fields[1].FieldName;
+    QA.Close;
+    Cmp('select * from ' + SqlTab, 'select *', True, Unassigned);
+    try
+      Cmp('SELECT ' + sF0 + ', ' + sF1 + ' FROM ' + SqlTab, 'campi', True, Unassigned);
+    except
+      on E: Exception do
+        if Pos('keyword', E.Message) > 0 then
+          Write('(campi: saltato, ', sF0, ' o ', sF1, ' e'' una parola riservata del Local SQL) ')
+        else
+          raise;
+    end;
+    // campo tra virgolette = stringa letterale nel Local SQL: deve restare al TQuery
+    Cmp('select "' + sF0 + '" from ' + SqlTab, 'campo quotato (resta TQuery)', False, Unassigned);
+    if (KeyField <> '') and not VarIsNull(FirstKey) and not VarIsEmpty(FirstKey) then
+      Cmp('select * from ' + SqlTab + ' where ' + KeyField + ' = :k',
+        'con WHERE (resta TQuery)', False, FirstKey);
+    // scrittura nella stessa connessione mentre la TTable e' aperta
+    if (TextField <> '') and (KeyField <> '') and not VarIsNull(FirstKey) then begin
+      QB.Open('select * from ' + SqlTab);
+      C2.StartTransaction;
+      try
+        C2.ExecSQL('update ' + SqlTab + ' set ' + TextField + ' = ' + TextField +
+          ' where ' + KeyField + ' = :k', [FirstKey]);
+        QB.Next;
+        Write('(update con TTable aperta: ok) ');
+      finally
+        C2.Rollback;
+        QB.Close;
+      end;
+    end;
+  finally
+    QB.Free;
+    QA.Free;
+    C2.Free;
   end;
 end;
 
@@ -639,6 +749,7 @@ begin
       Run('Query con parametro', TestParam);
       Run('TFDTable e Locate', TestTable);
       Run('Funzioni escape Local SQL', TestEscapes);
+      Run('Parametro TableCursor (select semplici con TTable)', TestTableCursor);
       if TextField <> '' then
         Run('Scrittura con rollback', TestWrite);
       if KeyField <> '' then

@@ -35,7 +35,8 @@ type
 implementation
 
 uses
-  System.SysUtils, System.Variants, System.Generics.Collections, System.IOUtils, Data.DB,
+  System.SysUtils, System.Variants, System.Generics.Collections, System.IOUtils,
+  System.RegularExpressions, Data.DB,
   BDE, Bde.DBTables,
   FireDAC.Stan.Consts, FireDAC.Stan.Util, FireDAC.Stan.Error, FireDAC.Stan.Option,
   FireDAC.Stan.Param, FireDAC.DatS,
@@ -72,6 +73,7 @@ type
     FSession: TSession;
     FOwnPrivateDir: String;
     FDatabase: TDatabase;
+    FTableCursor: Boolean;
   protected
     procedure InternalConnect; override;
     procedure InternalDisconnect; override;
@@ -99,6 +101,10 @@ type
   TFDPhysBDECommand = class(TFDPhysCommand)
   private
     FQuery: TQuery;
+    FTable: TTable;           // cursore per le select semplici (TableCursor=True)
+    FData: TDataSet;          // sorgente attiva: FQuery oppure FTable
+    FFields: TList<TField>;   // campi esposti, nell'ordine delle colonne
+    FColNames: TArray<String>;
     FColumnIndex: Integer;
     FMeta: TList<TArray<Variant>>;
     FMetaPos: Integer;
@@ -110,6 +116,8 @@ type
     procedure FetchQueryRows(ATable: TFDDatSTable; ARowsetSize: LongWord;
       var AResult: LongWord);
     procedure ClearMeta;
+    function TryPrepareTable: Boolean;
+    procedure BuildFields;
   protected
     procedure InternalPrepare; override;
     procedure InternalUnprepare; override;
@@ -130,6 +138,40 @@ type
 {-------------------------------------------------------------------------------}
 { Utilita'                                                                      }
 {-------------------------------------------------------------------------------}
+// Riconosce SOLO 'SELECT * FROM tab' e 'SELECT campo[, campo] FROM tab'
+// (campi NON tra virgolette: nel Local SQL del BDE "x" e' una stringa letterale;
+// tabella semplice o tra virgolette, una sola).
+// Qualsiasi altra cosa (WHERE, ORDER BY, JOIN, alias, funzioni, parametri...) non
+// corrisponde e resta al TQuery.
+function ParseSimpleSelect(const ASQL: String; out ATable: String;
+  out ACols: TArray<String>): Boolean;
+const
+  C_Pattern = '^\s*SELECT\s+(\*|\w+(?:\s*,\s*\w+)*)\s+FROM\s+("[^"]+"|[\w$.]+)\s*;?\s*$';
+var
+  oM: TMatch;
+  oMC: TMatchCollection;
+  i: Integer;
+  s: String;
+begin
+  Result := False;
+  ATable := '';
+  SetLength(ACols, 0);
+  oM := TRegEx.Match(ASQL, C_Pattern, [roIgnoreCase]);
+  if not oM.Success then
+    Exit;
+  ATable := oM.Groups[2].Value;
+  if (Length(ATable) > 1) and (ATable[1] = '"') then
+    ATable := Copy(ATable, 2, Length(ATable) - 2);
+  s := oM.Groups[1].Value;
+  if s <> '*' then begin
+    oMC := TRegEx.Matches(s, '\w+');
+    SetLength(ACols, oMC.Count);
+    for i := 0 to oMC.Count - 1 do
+      ACols[i] := oMC[i].Value;
+  end;
+  Result := True;
+end;
+
 procedure BDEError(AOwner: TObject; E: EDBEngineError; ARow: Integer = -1);
 var
   oExc: EFDBDENativeException;
@@ -291,6 +333,8 @@ begin
     S_FD_ConnParam_BDE_PrivateDir, -1]);
   Result.Rows.Add([Unassigned, S_FD_ConnParam_BDE_LockRetry, '@I', '',
     S_FD_ConnParam_BDE_LockRetry, -1]);
+  Result.Rows.Add([Unassigned, S_FD_ConnParam_BDE_TableCursor, '@L', 'False',
+    S_FD_ConnParam_BDE_TableCursor, -1]);
 end;
 
 {-------------------------------------------------------------------------------}
@@ -353,6 +397,7 @@ begin
       ForceDirectories(FOwnPrivateDir);
       FSession.PrivateDir := FOwnPrivateDir;
     end;
+    FTableCursor := oParams.TableCursor;
     FSession.Open;
     // attesa sui record bloccati (default BDE ~6 s): vale per la sessione
     if oParams.LockRetry >= 0 then begin
@@ -469,13 +514,69 @@ end;
 
 function TFDPhysBDECommand.GetCliObj: Pointer;
 begin
-  Result := FQuery;
+  Result := FData;
 end;
 
 procedure TFDPhysBDECommand.ClearMeta;
 begin
   FDFreeAndNil(FMeta);
   FMetaPos := 0;
+end;
+
+function TFDPhysBDECommand.TryPrepareTable: Boolean;
+var
+  sTab: String;
+  aCols: TArray<String>;
+  oTab: TTable;
+  i: Integer;
+begin
+  Result := False;
+  if GetCommandKind <> skSelect then
+    Exit;
+  if (GetParams <> nil) and (GetParams.Count > 0) then
+    Exit;
+  if not ParseSimpleSelect(FDbCommandText, sTab, aCols) then
+    Exit;
+  oTab := TTable.Create(nil);
+  try
+    try
+      oTab.DatabaseName := BDEConnection.FDatabase.DatabaseName;
+      oTab.SessionName := BDEConnection.FSession.SessionName;
+      oTab.TableName := sTab;
+      oTab.ReadOnly := True;
+      oTab.FieldDefs.Update;            // la tabella deve esistere
+      for i := 0 to High(aCols) do      // e contenere i campi richiesti
+        if oTab.FieldDefs.IndexOf(aCols[i]) < 0 then
+          raise Exception.Create('campo non trovato: ' + aCols[i]);
+    except
+      // qualsiasi dubbio: si torna al TQuery, che riporta l'errore corretto
+      FDFree(oTab);
+      Exit;
+    end;
+    FTable := oTab;
+    FData := oTab;
+    FColNames := aCols;
+    Result := True;
+  except
+    FDFree(oTab);
+    raise;
+  end;
+end;
+
+procedure TFDPhysBDECommand.BuildFields;
+var
+  i: Integer;
+begin
+  if FFields = nil then
+    FFields := TList<TField>.Create
+  else
+    FFields.Clear;
+  if (FTable <> nil) and (Length(FColNames) > 0) then
+    for i := 0 to High(FColNames) do
+      FFields.Add(FTable.FieldByName(FColNames[i]))
+  else
+    for i := 0 to FData.FieldCount - 1 do
+      FFields.Add(FData.Fields[i]);
 end;
 
 procedure TFDPhysBDECommand.InternalPrepare;
@@ -491,7 +592,11 @@ begin
   GenerateLimitSelect();
   GenerateParamMarkers();
 
+  if BDEConnection.FTableCursor and TryPrepareTable then
+    Exit;
+
   FQuery := TQuery.Create(nil);
+  FData := FQuery;
   try
     FQuery.DatabaseName := BDEConnection.FDatabase.DatabaseName;
     FQuery.SessionName := BDEConnection.FSession.SessionName;
@@ -500,6 +605,7 @@ begin
     FQuery.Prepare;
   except
     on E: EDBEngineError do begin
+      FData := nil;
       FDFreeAndNil(FQuery);
       BDEError(Self, E);
     end;
@@ -509,6 +615,10 @@ end;
 procedure TFDPhysBDECommand.InternalUnprepare;
 begin
   ClearMeta;
+  FData := nil;
+  FDFreeAndNil(FFields);
+  SetLength(FColNames, 0);
+  FDFreeAndNil(FTable);
   FDFreeAndNil(FQuery);
 end;
 
@@ -568,9 +678,17 @@ begin
     Exit;
   end;
   try
-    FQuery.Close;
-    BindParams(0);
-    FQuery.Open;
+    if FTable <> nil then begin
+      FTable.Close;
+      FTable.Open;
+      AtomicIncrement(BDEStatTableCursorOpens);
+    end
+    else begin
+      FQuery.Close;
+      BindParams(0);
+      FQuery.Open;
+    end;
+    BuildFields;
     Result := True;
   except
     on E: EDBEngineError do
@@ -585,8 +703,8 @@ end;
 
 procedure TFDPhysBDECommand.InternalClose;
 begin
-  if FQuery <> nil then
-    FQuery.Close;
+  if FData <> nil then
+    FData.Close;
   ClearMeta;
 end;
 
@@ -626,10 +744,10 @@ var
   oFld: TField;
   iPrec: Integer;
 begin
-  Result := (FQuery <> nil) and (FColumnIndex < FQuery.FieldCount);
+  Result := (FFields <> nil) and (FColumnIndex < FFields.Count);
   if not Result then
     Exit;
-  oFld := FQuery.Fields[FColumnIndex];
+  oFld := FFields[FColumnIndex];
   if oFld is TBCDField then
     iPrec := TBCDField(oFld).Precision
   else
@@ -668,7 +786,7 @@ var
   sMemo: String;
 begin
   for i := 1 to ARowsetSize do begin
-    if FQuery.Eof then
+    if FData.Eof then
       Break;
     oRow := ATable.NewRow(False);
     try
@@ -676,14 +794,14 @@ begin
         oCol := ATable.Columns[j];
         if (oCol.SourceID > 0) and
            CheckFetchColumn(oCol.SourceDataType, oCol.Attributes) then begin
-          oFld := FQuery.Fields[oCol.SourceID - 1];
+          oFld := FFields[oCol.SourceID - 1];
           if oFld.IsNull then
             oRow.SetData(j, nil, 0)
           else
             case oCol.DataType of
             dtBlob:
               begin
-                oStr := FQuery.CreateBlobStream(oFld, bmRead);
+                oStr := FData.CreateBlobStream(oFld, bmRead);
                 try
                   iSize := oStr.Size;
                   SetLength(aBuf, iSize);
@@ -700,7 +818,7 @@ begin
             dtWideMemo, dtMemo:
               begin
                 // lettura via stream (come i BLOB) e decodifica ANSI esplicita
-                oStr := FQuery.CreateBlobStream(oFld, bmRead);
+                oStr := FData.CreateBlobStream(oFld, bmRead);
                 try
                   iSize := oStr.Size;
                   SetLength(aBuf, iSize);
@@ -741,7 +859,7 @@ begin
       FDFree(oRow);
       raise;
     end;
-    FQuery.Next;
+    FData.Next;
     Inc(AResult);
   end;
 end;

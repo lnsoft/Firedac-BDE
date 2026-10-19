@@ -19,6 +19,11 @@ const
   S_FD_ConnParam_BDE_NetFileDir = 'NetFileDir'; // dir di PDOXUSRS.NET (Paradox condiviso)
   S_FD_ConnParam_BDE_PrivateDir = 'PrivateDir'; // dir temporanea per sessione
   S_FD_ConnParam_BDE_LockRetry = 'LockRetry';   // secondi di attesa su record bloccato (BDE: ~6)
+  S_FD_ConnParam_BDE_TableCursor = 'TableCursor'; // True = select semplici (select * from TAB) con cursore TTable
+
+var
+  // diagnostica (test): numero di aperture fatte con il cursore TTable (TableCursor=True)
+  BDEStatTableCursorOpens: Integer = 0;
 
 type
   TFDPhysBDEConnectionDefParams = class(TFDConnectionDefParams)
@@ -33,6 +38,8 @@ type
     procedure SetPrivateDir(const AValue: String);
     function GetLockRetry: Integer;
     procedure SetLockRetry(const AValue: Integer);
+    function GetTableCursor: Boolean;
+    procedure SetTableCursor(const AValue: Boolean);
   published
     property DriverID: String read GetDriverID write SetDriverID stored False;
     // Database (ereditato): alias BDE oppure percorso della cartella con DBF/DB
@@ -41,6 +48,10 @@ type
     property PrivateDir: String read GetPrivateDir write SetPrivateDir stored False;
     // -1 = non impostato (default del BDE); 0 = nessuna attesa
     property LockRetry: Integer read GetLockRetry write SetLockRetry stored False;
+    // False (default): ogni SELECT passa dal TQuery del BDE (copia dei risultati all'apertura).
+    // True: 'select * from TAB' e 'select campi from TAB' (senza WHERE/ORDER BY/join/parametri)
+    // aprono una TTable: apertura immediata anche su tabelle grandi, dati in lettura 'vivi'.
+    property TableCursor: Boolean read GetTableCursor write SetTableCursor stored False;
   end;
 
 implementation
@@ -102,6 +113,22 @@ end;
 procedure TFDPhysBDEConnectionDefParams.SetLockRetry(const AValue: Integer);
 begin
   FDef.AsString[S_FD_ConnParam_BDE_LockRetry] := IntToStr(AValue);
+end;
+
+function TFDPhysBDEConnectionDefParams.GetTableCursor: Boolean;
+begin
+  if not FDef.HasValue(S_FD_ConnParam_BDE_TableCursor) then
+    Result := False
+  else
+    Result := SameText(FDef.AsString[S_FD_ConnParam_BDE_TableCursor], 'True');
+end;
+
+procedure TFDPhysBDEConnectionDefParams.SetTableCursor(const AValue: Boolean);
+begin
+  if AValue then
+    FDef.AsString[S_FD_ConnParam_BDE_TableCursor] := 'True'
+  else
+    FDef.AsString[S_FD_ConnParam_BDE_TableCursor] := 'False';
 end;
 
 end.

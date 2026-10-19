@@ -90,6 +90,7 @@ FDQuery1.Post;
 | `NetFileDir` | Folder of `PDOXUSRS.NET` for shared Paradox access (must be the same for all users) |
 | `PrivateDir` | Temporary folder of the BDE session. Default: an automatic temp folder removed on disconnect |
 | `LockRetry`  | Seconds to wait on a locked record. `0` = don't wait. Not set = BDE default (about 6 s) |
+| `TableCursor` | `True` = a plain `select * from TAB` / `select f1, f2 from TAB` (no WHERE, ORDER BY, join, parameters) is read through a BDE `TTable` instead of a `TQuery`: it opens at once even on very large tables (a `TQuery` copies the whole result on open). Default `False`. The data is a live cursor; any other SELECT still uses `TQuery` |
 | `Password`   | Paradox table password (`AddPassword`) |
 
 ## Things to know (limitations)

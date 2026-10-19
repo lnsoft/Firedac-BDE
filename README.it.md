@@ -86,6 +86,7 @@ FDQuery1.Post;
 | `NetFileDir` | Cartella di `PDOXUSRS.NET` per Paradox condiviso (uguale per tutti gli utenti) |
 | `PrivateDir` | Cartella temporanea della sessione BDE. Default: cartella temporanea automatica, rimossa alla disconnessione |
 | `LockRetry`  | Secondi di attesa su record bloccato. `0` = non attendere. Non impostato = default BDE (circa 6 s) |
+| `TableCursor` | `True` = un semplice `select * from TAB` / `select c1, c2 from TAB` (senza WHERE, ORDER BY, join, parametri) viene letto con una `TTable` del BDE invece che con un `TQuery`: si apre subito anche su tabelle molto grandi (il `TQuery` copia tutto il risultato all'apertura). Default `False`. I dati sono un cursore vivo; ogni altra SELECT usa ancora il `TQuery` |
 | `Password`   | Password della tabella Paradox (`AddPassword`) |
 
 ## Limiti da conoscere
