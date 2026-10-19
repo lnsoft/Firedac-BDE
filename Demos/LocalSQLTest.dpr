@@ -5,12 +5,15 @@ program LocalSQLTest;
   Uso:
     LocalSQLTest <cartella|alias> <TABELLA_A.DB|DBF> <TABELLA_B.DB|DBF> <chiave A> <chiave B>
                   [campo testo di A | -] [campo join A] [campo join B]
-                  [campo memo | -] [campo data | -] [campo booleano | -] [safe]
+                  [campo memo | -] [campo data | -] [campo booleano | -] [safe] [ttable] [md]
 
   chiave A / chiave B: campi UNICI (usati per WHERE e UPDATE); i campi di join
   (7o e 8o parametro) sono quelli del join a.<join A> = b.<join B>; se omessi
   si usano le chiavi. 'safe' (in qualsiasi posizione) registra le tabelle virtuali in anticipo;
   '-' come campo testo = nessun test di UPDATE.
+  'md': esegue SOLO il test master-detail (A = testate, B = dettaglio) con TableCursor.
+  'ttable': le tabelle virtuali a/b usano TTable del BDE (cursore, niente fetch completo)
+  invece di TFDQuery sul driver FireDAC: serve a confrontare apertura e join.
 
   Le tabelle A e B possono anche coincidere (auto-join). Nelle query SQL
   compaiono come "a" e "b". Un dataset BDE NUOVO e DEDICATO viene creato
@@ -32,6 +35,7 @@ uses
   FireDAC.DatS, FireDAC.Phys.Intf, FireDAC.Phys, FireDAC.DApt.Intf, FireDAC.DApt,
   FireDAC.UI.Intf, FireDAC.ConsoleUI.Wait,
   FireDAC.Comp.Client, FireDAC.Comp.DataSet,
+  Bde.DBTables,
   FireDAC.Phys.SQLite, FireDAC.Phys.SQLiteDef, FireDAC.Phys.SQLiteVDataSet,
   FireDAC.Phys.BDEDef in '..\Source\FireDAC.Phys.BDEDef.pas',
   FireDAC.Phys.BDEMeta in '..\Source\FireDAC.Phys.BDEMeta.pas',
@@ -51,7 +55,7 @@ var
   KeyVal: Variant;
   GetCalls, Retries: Integer;
   VaQuery: TFDQuery;
-  SafeMode: Boolean;
+  SafeMode, UseTTable, OnlyMD: Boolean;
   JoinA, JoinB: String;   // campi di join (default = chiavi)
   MemoF, DateF, BoolF: String;   // campi per la prova dei tipi
   GetNames: String;
@@ -65,10 +69,16 @@ var
   i: Integer;
 begin
   SafeMode := False;
+  UseTTable := False;
+  OnlyMD := False;
   SetLength(Args, 0);
   for i := 1 to ParamCount do
     if SameText(ParamStr(i), 'safe') then
       SafeMode := True
+    else if SameText(ParamStr(i), 'ttable') then
+      UseTTable := True
+    else if SameText(ParamStr(i), 'md') then
+      OnlyMD := True
     else begin
       SetLength(Args, Length(Args) + 1);
       Args[High(Args)] := ParamStr(i);
@@ -83,6 +93,14 @@ end;
 function ArgCount: Integer;
 begin
   Result := Length(Args);
+end;
+
+function SourceKind: String;
+begin
+  if UseTTable then
+    Result := 'TTable del BDE'
+  else
+    Result := 'TFDQuery sul driver';
 end;
 
 function QuoteTab(const AName: String): String;
@@ -101,9 +119,30 @@ procedure THelper.GetDS(ASender: TObject; const ASchemaName, AName: String;
   var ADataSet: TDataSet; var AOwned: Boolean);
 var
   Q: TFDQuery;
+  T: TTable;
+  sw: TStopwatch;
 begin
   Inc(GetCalls);
-  GetNames := GetNames + AName + ' ';
+  sw := TStopwatch.StartNew;
+  if UseTTable and (SameText(AName, 'a') or SameText(AName, 'b')) then begin
+    // sorgente = TTable del BDE (cursore sulla tabella, nessun fetch completo)
+    T := TTable.Create(nil);
+    try
+      T.DatabaseName := Folder;
+      if SameText(AName, 'a') then
+        T.TableName := TabA
+      else
+        T.TableName := TabB;
+      T.Open;
+    except
+      T.Free;
+      raise;
+    end;
+    ADataSet := T;
+    AOwned := True;
+    GetNames := GetNames + AName + '[TTable ' + IntToStr(sw.ElapsedMilliseconds) + ' ms] ';
+    Exit;
+  end;
   Q := TFDQuery.Create(nil);
   try
     if SameText(AName, 'a') then begin
@@ -131,6 +170,7 @@ begin
   end;
   ADataSet := Q;
   AOwned := Q <> VaQuery;
+  GetNames := GetNames + AName + '[' + IntToStr(sw.ElapsedMilliseconds) + ' ms] ';
 end;
 
 procedure Run(const AName: String; AProc: TProc);
@@ -281,6 +321,69 @@ begin
     'FireDAC Local SQL: ', VarToStr(nLite), ' righe in ', msLite, ' ms) ');
   if nNative <> nLite then
     raise Exception.Create('Risultato diverso tra join nativo BDE e Local SQL FireDAC');
+end;
+
+procedure TestDetailLookup;
+var
+  sw: TStopwatch;
+  nNative, nLite: Variant;
+  msNative, msLite: Int64;
+  vJoin: Variant;
+  Q: TFDQuery;
+  nTable: Integer;
+  msTable: Int64;
+begin
+  // le righe di un documento: WHERE semplice sulla tabella dettaglio (senza join)
+  vJoin := BdeConn.ExecSQLScalar('select ' + JoinA + ' from ' + QuoteTab(TabA) +
+    ' where ' + KeyA + ' = :k', [KeyVal]);
+  sw := TStopwatch.StartNew;
+  nNative := BdeConn.ExecSQLScalar('select count(*) from ' + QuoteTab(TabB) +
+    ' where ' + JoinB + ' = :k', [vJoin]);
+  msNative := sw.ElapsedMilliseconds;
+  sw := TStopwatch.StartNew;
+  nLite := Lite('select count(*) from b where ' + JoinB + ' = :k', [vJoin]);
+  msLite := sw.ElapsedMilliseconds;
+  // TFDQuery sul driver con WHERE (apre e legge le righe del documento)
+  sw := TStopwatch.StartNew;
+  Q := TFDQuery.Create(nil);
+  try
+    Q.Connection := BdeConn;
+    Q.Open('select * from ' + QuoteTab(TabB) + ' where ' + JoinB + ' = :k', [vJoin]);
+    nTable := 0;
+    while not Q.Eof do begin
+      Inc(nTable);
+      Q.Next;
+    end;
+  finally
+    Q.Free;
+  end;
+  msTable := sw.ElapsedMilliseconds;
+  Write('(dettaglio per ', JoinB, '=', VarToStr(vJoin), ': BDE nativo count ', VarToStr(nNative),
+    ' righe in ', msNative, ' ms; Local SQL ', VarToStr(nLite), ' righe in ', msLite,
+    ' ms; TFDQuery sul driver select * ', nTable, ' righe in ', msTable, ' ms) ');
+  if nNative <> nLite then
+    raise Exception.Create('Conteggio diverso tra BDE nativo e Local SQL');
+end;
+
+procedure TestNativeJoinWhere;
+var
+  sw: TStopwatch;
+  nNative, nLite: Variant;
+  msNative, msLite: Int64;
+begin
+  // join per un solo documento (testata-righe): BDE nativo contro Local SQL FireDAC
+  sw := TStopwatch.StartNew;
+  nNative := BdeConn.ExecSQLScalar('select count(*) from ' + QuoteTab(TabA) + ' a join ' +
+    QuoteTab(TabB) + ' b on a.' + JoinA + ' = b.' + JoinB + ' where a.' + KeyA + ' = :k',
+    [KeyVal]);
+  msNative := sw.ElapsedMilliseconds;
+  sw := TStopwatch.StartNew;
+  nLite := Lite('select count(*) from ' + JoinOn + ' where a.' + KeyA + ' = :k', [KeyVal]);
+  msLite := sw.ElapsedMilliseconds;
+  Write('(BDE nativo: ', VarToStr(nNative), ' righe in ', msNative, ' ms; ',
+    'FireDAC Local SQL: ', VarToStr(nLite), ' righe in ', msLite, ' ms) ');
+  if nNative <> nLite then
+    raise Exception.Create('Risultato diverso tra join selettivo nativo BDE e Local SQL FireDAC');
 end;
 
 procedure TestJoinWhere;
@@ -491,6 +594,108 @@ begin
   end;
 end;
 
+// Master-detail reale: per le prime 300 testate si leggono le righe del dettaglio,
+// con la connessione normale e con TableCursor=True. Totale righe e apertura devono coincidere.
+procedure TestMasterDetail;
+const
+  C_Masters = 300;
+var
+  C2: TFDConnection;
+
+  procedure Pass(AConn: TFDConnection; AUseQuery: Boolean; out ANMast, ANDet, AOpens: Integer;
+    out AMs: Int64);
+  var
+    M: TFDTable;
+    D: TFDDataSet;
+    DS: TDataSource;
+    SW: TStopwatch;
+    n0: Integer;
+  begin
+    M := TFDTable.Create(nil);
+    DS := TDataSource.Create(nil);
+    if AUseQuery then
+      D := TFDQuery.Create(nil)
+    else
+      D := TFDTable.Create(nil);
+    try
+      M.Connection := AConn;
+      M.TableName := TabA;
+      M.IndexFieldNames := JoinA;
+      DS.DataSet := M;
+      if AUseQuery then begin
+        TFDQuery(D).Connection := AConn;
+        TFDQuery(D).SQL.Text := 'select * from ' + QuoteTab(TabB) + ' where ' + JoinB +
+          ' = :' + JoinA + ' order by ' + JoinB;
+        TFDQuery(D).MasterSource := DS;
+        TFDQuery(D).MasterFields := JoinA;
+      end
+      else begin
+        TFDTable(D).Connection := AConn;
+        TFDTable(D).TableName := TabB;
+        TFDTable(D).IndexFieldNames := JoinB;
+        TFDTable(D).MasterSource := DS;
+        TFDTable(D).MasterFields := JoinA;
+      end;
+      n0 := BDEStatTableCursorOpens;
+      SW := TStopwatch.StartNew;
+      M.Open;
+      D.Open;
+      ANMast := 0;
+      ANDet := 0;
+      while (not M.Eof) and (ANMast < C_Masters) do begin
+        Inc(ANMast);
+        D.First;
+        while not D.Eof do begin
+          Inc(ANDet);
+          D.Next;
+        end;
+        M.Next;
+      end;
+      AMs := SW.ElapsedMilliseconds;
+      AOpens := BDEStatTableCursorOpens - n0;
+    finally
+      D.Free;
+      DS.Free;
+      M.Free;
+    end;
+  end;
+
+  procedure Both(AUseQuery: Boolean; const ALabel: String);
+  var
+    nM1, nD1, o1, nM2, nD2, o2: Integer;
+    ms1, ms2: Int64;
+  begin
+    Pass(BdeConn, AUseQuery, nM1, nD1, o1, ms1);
+    BDEStatRejectedSelects := '';
+    Pass(C2, AUseQuery, nM2, nD2, o2, ms2);
+    if BDEStatRejectedSelects <> '' then
+      Writeln(sLineBreak, '    SELECT non riconosciute da TableCursor (', ALabel, '):', sLineBreak,
+        '    ', Copy(StringReplace(BDEStatRejectedSelects, sLineBreak, sLineBreak + '    ',
+          [rfReplaceAll]), 1, 1200));
+    Write('(', ALabel, ': ', nM1, ' testate, ', nD1, ' righe; normale ', ms1, ' ms, TableCursor ',
+      ms2, ' ms, aperture TTable ', o2, ') ');
+    if (nM1 <> nM2) or (nD1 <> nD2) then
+      raise Exception.CreateFmt('%s: risultati diversi (%d/%d contro %d/%d)',
+        [ALabel, nM1, nD1, nM2, nD2]);
+    if o1 <> 0 then
+      raise Exception.Create(ALabel + ': la connessione normale non deve usare la TTable');
+  end;
+
+begin
+  C2 := TFDConnection.Create(nil);
+  try
+    C2.DriverName := 'BDE';
+    C2.LoginPrompt := False;
+    C2.Params.Database := Folder;
+    C2.Params.Values['TableCursor'] := 'True';
+    C2.Open;
+    Both(False, 'TFDTable detail');
+    Both(True, 'TFDQuery detail con parametro');
+  finally
+    C2.Free;
+  end;
+end;
+
 procedure TestUpdate;
 var
   vOld, vNow: Variant;
@@ -582,11 +787,18 @@ begin
     Writeln('righe: a=', VarToStr(BdeConn.ExecSQLScalar('select count(*) from ' + QuoteTab(TabA))),
       ' b=', VarToStr(BdeConn.ExecSQLScalar('select count(*) from ' + QuoteTab(TabB))));
 
+    if OnlyMD then
+      Run('Master-detail con TableCursor (TFDTable e TFDQuery)', TestMasterDetail)
+    else begin
     if SafeMode then begin
       // nessun comando fallito: tutte le tabelle virtuali registrate con TFDQuery.Open
-      Writeln('(modo safe: registrazione preventiva di a, b, va con TFDQuery.Open)');
+      Writeln('(modo safe: registrazione preventiva di a, b, va con TFDQuery.Open; sorgenti: ' + SourceKind + ')');
       WarmUp('a');
+      Writeln('    apertura a: ', GetNames);
+      GetNames := '';
       WarmUp('b');
+      Writeln('    apertura b: ', GetNames);
+      GetNames := '';
       WarmUp('va');
     end
     else begin
@@ -597,6 +809,8 @@ begin
     Run('Stessa tabella virtuale due volte (auto-join)', TestSameNameTwice);
     Run('Join a-b (tutte le righe)', TestJoinAll);
     Run('Confronto con il join nativo del BDE', TestNativeJoin);
+    Run('Righe di un documento (WHERE semplice sul dettaglio)', TestDetailLookup);
+    Run('Join per un solo documento: BDE nativo contro Local SQL', TestNativeJoinWhere);
     Run('Join a-b con WHERE selettivo', TestJoinWhere);
     Run('CASE / COALESCE / LIMIT', TestCaseCoalesceLimit);
     Run('Sottoquery', TestSubquery);
@@ -606,6 +820,8 @@ begin
     Run('Memo, data e booleano attraverso la tabella virtuale', TestTypes);
     Run('UPDATE sulla tabella virtuale', TestUpdate);
     Run('Modifica esterna visibile?', TestRefresh);
+
+    end;
 
     Write('Chiusura: ');
     if VaQuery <> nil then

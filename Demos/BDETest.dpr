@@ -229,6 +229,68 @@ var
   sF0, sF1: String;
   n, n0, n1: Integer;
   bTab: Boolean;
+  vMin, vMax, vMid: Variant;
+  oT: TFDTable;
+  SWt: TStopwatch;
+
+  // WHERE + ORDER BY sulla chiave: si confrontano le chiavi (l'ordine tra chiavi uguali
+  // non e' definito) e il numero totale di righe
+  procedure CmpKeys(const ASQL, ALabel: String; AExpectTable: Boolean;
+    const A1, A2: Variant);
+  var
+    m0, m1, nA, nB: Integer;
+    bT: Boolean;
+    SW: TStopwatch;
+    msA, msB: Int64;
+  begin
+    m0 := BDEStatTableCursorOpens;
+    SW := TStopwatch.StartNew;
+    if VarIsEmpty(A1) then QA.Open(ASQL)
+    else if VarIsEmpty(A2) then QA.Open(ASQL, [A1])
+    else QA.Open(ASQL, [A1, A2]);
+    msA := SW.ElapsedMilliseconds;
+    m1 := BDEStatTableCursorOpens;
+    SW := TStopwatch.StartNew;
+    if VarIsEmpty(A1) then QB.Open(ASQL)
+    else if VarIsEmpty(A2) then QB.Open(ASQL, [A1])
+    else QB.Open(ASQL, [A1, A2]);
+    msB := SW.ElapsedMilliseconds;
+    bT := BDEStatTableCursorOpens > m1;
+    try
+      if m1 <> m0 then
+        raise Exception.Create(ALabel + ': senza TableCursor non deve usare la TTable');
+      if bT <> AExpectTable then
+        raise Exception.Create(ALabel + ': uso della TTable diverso dall''atteso (atteso ' +
+          BoolToStr(AExpectTable, True) + ')');
+      nA := 0;
+      while (not QA.Eof) and (not QB.Eof) and (nA < 5000) do begin
+        if QA.FieldByName(KeyField).AsString <> QB.FieldByName(KeyField).AsString then
+          raise Exception.CreateFmt('%s: riga %d, chiave diversa (%s / %s)',
+            [ALabel, nA + 1, QA.FieldByName(KeyField).AsString,
+             QB.FieldByName(KeyField).AsString]);
+        Inc(nA);
+        QA.Next;
+        QB.Next;
+      end;
+      nB := nA;
+      while not QA.Eof do begin
+        Inc(nA);
+        QA.Next;
+      end;
+      while not QB.Eof do begin
+        Inc(nB);
+        QB.Next;
+      end;
+      if nA <> nB then
+        raise Exception.CreateFmt('%s: righe diverse (TQuery %d, secondo percorso %d)',
+          [ALabel, nA, nB]);
+      Write('(', ALabel, ': ', nA, ' righe; TQuery ', msA, ' ms, ',
+        IfThen(bT, 'TTable ', 'TQuery '), msB, ' ms) ');
+    finally
+      QA.Close;
+      QB.Close;
+    end;
+  end;
 
   procedure Cmp(const ASQL, ALabel: String; AExpectTable: Boolean;
     const AParam: Variant);
@@ -281,6 +343,7 @@ var
   end;
 
 begin
+  bTab := False;
   C2 := TFDConnection.Create(nil);
   QA := TFDQuery.Create(nil);
   QB := TFDQuery.Create(nil);
@@ -313,6 +376,20 @@ begin
     if (KeyField <> '') and not VarIsNull(FirstKey) and not VarIsEmpty(FirstKey) then
       Cmp('select * from ' + SqlTab + ' where ' + KeyField + ' = :k',
         'con WHERE (resta TQuery)', False, FirstKey);
+    // TFDTable.Open genera 'SELECT A.* FROM "tab" A' (alias A): deve usare la TTable
+    oT := TFDTable.Create(nil);
+    try
+      oT.Connection := C2;
+      oT.TableName := TabName;
+      n1 := BDEStatTableCursorOpens;
+      SWt := TStopwatch.StartNew;
+      oT.Open;
+      if BDEStatTableCursorOpens = n1 then
+        raise Exception.Create('TFDTable.Open non usa la TTable');
+      Write('(TFDTable.Open con TTable: ', SWt.ElapsedMilliseconds, ' ms) ');
+    finally
+      oT.Free;
+    end;
     // ORDER BY sulla chiave: con indice usa la TTable; l'ordine della chiave deve coincidere
     // (tra righe con la stessa chiave l'ordine non e' definito: si confronta solo la chiave)
     if KeyField <> '' then begin
@@ -350,6 +427,28 @@ begin
       finally
         QB.Close;
       end;
+    end;
+    // WHERE + ORDER BY sullo stesso campo numerico: intervalli con SetRange sulla TTable
+    if (KeyField <> '') and not VarIsNull(FirstKey) and not VarIsEmpty(FirstKey) and
+       VarIsNumeric(FirstKey) then begin
+      vMin := Conn.ExecSQLScalar('select min(' + KeyField + ') from ' + SqlTab);
+      vMax := Conn.ExecSQLScalar('select max(' + KeyField + ') from ' + SqlTab);
+      vMid := vMin + (vMax - vMin) / 2;
+      CmpKeys('select * from ' + SqlTab + ' where ' + KeyField + ' = :a order by ' + KeyField,
+        'where = + order by', bTab, FirstKey, Unassigned);
+      CmpKeys('select * from ' + SqlTab + ' where ' + KeyField + ' >= :a and ' + KeyField +
+        ' <= :b order by ' + KeyField, 'where >= e <=', bTab, vMid, vMax);
+      CmpKeys('select * from ' + SqlTab + ' where ' + KeyField + ' > :a order by ' + KeyField,
+        'where >', bTab, vMid, Unassigned);
+      CmpKeys('select * from ' + SqlTab + ' where ' + KeyField + ' < :a order by ' + KeyField,
+        'where <', bTab, vMid, Unassigned);
+      CmpKeys('select * from ' + SqlTab + ' where ' + KeyField + ' >= ' + FloatToStr(vMid, TFormatSettings.Invariant) +
+        ' order by ' + KeyField, 'where >= numero letterale', bTab, Unassigned, Unassigned);
+      // casi che devono restare al TQuery
+      CmpKeys('select * from ' + SqlTab + ' where ' + KeyField + ' >= :a order by ' + KeyField + ' desc',
+        'where con order by desc (resta TQuery)', False, vMid, Unassigned);
+      CmpKeys('select * from ' + SqlTab + ' where ' + KeyField + ' >= :a',
+        'where senza order by (resta TQuery)', False, vMid, Unassigned);
     end;
     // scrittura nella stessa connessione mentre la TTable e' aperta
     if (TextField <> '') and (KeyField <> '') and not VarIsNull(FirstKey) then begin
@@ -426,6 +525,76 @@ begin
       ' righe: chiave diversa ', nKey, ', riga diversa ', nRow, ') ');
     if nKey > 0 then
       raise Exception.Create('Ordine diverso tra TQuery e TTable');
+  finally
+    T.Free;
+    QA.Free;
+  end;
+end;
+
+// Misura: WHERE su un intervallo del campo chiave (numerico) con TQuery contro
+// TTable + IndexFieldNames + SetRange. Serve a decidere se estendere TableCursor ai WHERE.
+procedure TestWhereRange;
+var
+  QA: TFDQuery;
+  T: TTable;
+  SW: TStopwatch;
+  msA, msB, msC: Int64;
+  vMin, vMax, vMid: Variant;
+  nCnt, nT, n: Integer;
+begin
+  vMin := Conn.ExecSQLScalar('select min(' + KeyField + ') from ' + SqlTab);
+  vMax := Conn.ExecSQLScalar('select max(' + KeyField + ') from ' + SqlTab);
+  if VarIsNull(vMin) or VarIsNull(vMax) or not VarIsNumeric(vMin) then begin
+    Write('(chiave vuota o non numerica: saltato) ');
+    Exit;
+  end;
+  vMid := vMin + (vMax - vMin) / 2;
+  nCnt := Conn.ExecSQLScalar('select count(*) from ' + SqlTab + ' where ' + KeyField +
+    ' >= :a and ' + KeyField + ' <= :b', [vMid, vMax]);
+  QA := TFDQuery.Create(nil);
+  T := TTable.Create(nil);
+  try
+    QA.Connection := Conn;
+    SW := TStopwatch.StartNew;
+    QA.Open('select * from ' + SqlTab + ' where ' + KeyField + ' >= :a and ' + KeyField +
+      ' <= :b order by ' + KeyField, [vMid, vMax]);
+    msA := SW.ElapsedMilliseconds;
+    T.DatabaseName := Folder;
+    T.TableName := TabName;
+    T.ReadOnly := True;
+    T.IndexFieldNames := KeyField;
+    SW := TStopwatch.StartNew;
+    try
+      T.Open;
+      T.SetRange([vMid], [vMax]);
+    except
+      on E: EDBEngineError do begin
+        Write('(where ', KeyField, ' >= ', VarToStr(vMid), ': TQuery ', msA,
+          ' ms; TTable non applicabile: ', Copy(E.Message, 1, 80), ') ');
+        Exit;
+      end;
+    end;
+    msB := SW.ElapsedMilliseconds;
+    n := 0;
+    while (not QA.Eof) and (not T.Eof) and (n < 5000) do begin
+      if QA.FieldByName(KeyField).AsString <> T.FieldByName(KeyField).AsString then
+        raise Exception.CreateFmt('Chiave diversa alla riga %d', [n + 1]);
+      Inc(n);
+      QA.Next;
+      T.Next;
+    end;
+    SW := TStopwatch.StartNew;
+    nT := n;
+    while not T.Eof do begin
+      Inc(nT);
+      T.Next;
+    end;
+    msC := SW.ElapsedMilliseconds;
+    Write('(where ', KeyField, ' >= ', VarToStr(vMid), ': ', nCnt, ' righe; TQuery apertura ', msA,
+      ' ms, TTable+SetRange apertura ', msB, ' ms, lettura completa TTable ', msC, ' ms; prime ',
+      n, ' chiavi uguali) ');
+    if nT <> nCnt then
+      raise Exception.CreateFmt('Righe diverse: count(*)=%d, TTable=%d', [nCnt, nT]);
   finally
     T.Free;
     QA.Free;
@@ -852,6 +1021,8 @@ begin
       Run('Parametro TableCursor (select semplici con TTable)', TestTableCursor);
       if KeyField <> '' then
         Run('Misura ORDER BY: TQuery contro TTable con indice', TestOrderBy);
+      if KeyField <> '' then
+        Run('Misura WHERE su intervallo di chiave: TQuery contro TTable', TestWhereRange);
       if TextField <> '' then
         Run('Scrittura con rollback', TestWrite);
       if KeyField <> '' then

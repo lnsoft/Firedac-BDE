@@ -24,6 +24,8 @@ const
 var
   // diagnostica (test): numero di aperture fatte con il cursore TTable (TableCursor=True)
   BDEStatTableCursorOpens: Integer = 0;
+  // diagnostica (test): testi delle SELECT che TableCursor non ha riconosciuto (max ~4000 caratteri)
+  BDEStatRejectedSelects: String = '';
 
 type
   TFDPhysBDEConnectionDefParams = class(TFDConnectionDefParams)

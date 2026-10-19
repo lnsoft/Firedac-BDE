@@ -98,6 +98,15 @@ type
     procedure InternalRollback(ATxID: LongWord); override;
   end;
 
+  // condizione di WHERE ammessa per l'apertura con TTable + SetRange
+  TBDERangeCond = record
+    Field: String;
+    Op: String;       // '=', '>=', '<=', '>', '<'
+    Param: String;    // nome del parametro, oppure '' se e' un numero letterale
+    Literal: Variant;
+    Pos: Integer;     // posizione del campo nell'elenco ORDER BY
+  end;
+
   TFDPhysBDECommand = class(TFDPhysCommand)
   private
     FQuery: TQuery;
@@ -105,6 +114,10 @@ type
     FData: TDataSet;          // sorgente attiva: FQuery oppure FTable
     FFields: TList<TField>;   // campi esposti, nell'ordine delle colonne
     FColNames: TArray<String>;
+    FConds: TArray<TBDERangeCond>;   // WHERE per SetRange (con ORDER BY)
+    FOrderFields: TArray<String>;
+    FEqIdx: TArray<Integer>;         // indici in FConds delle uguaglianze, per posizione
+    FLoIdx, FHiIdx: Integer;         // limite inferiore / superiore (-1 = nessuno)
     FColumnIndex: Integer;
     FMeta: TList<TArray<Variant>>;
     FMetaPos: Integer;
@@ -118,6 +131,10 @@ type
     procedure ClearMeta;
     function TryPrepareTable: Boolean;
     procedure BuildFields;
+    procedure CreateQuery;
+    procedure SwitchToQuery;
+    function CondValue(AIdx: Integer; out AValue: Variant): Boolean;
+    function SetupTableRange: Boolean;
   protected
     procedure InternalPrepare; override;
     procedure InternalUnprepare; override;
@@ -144,38 +161,75 @@ type
 // Qualsiasi altra cosa (WHERE, ORDER BY, JOIN, alias, funzioni, parametri...) non
 // corrisponde e resta al TQuery.
 function ParseSimpleSelect(const ASQL: String; out ATable: String;
-  out ACols, AOrder: TArray<String>): Boolean;
+  out ACols, AOrder: TArray<String>; out AConds: TArray<TBDERangeCond>): Boolean;
 const
-  C_Pattern = '^\s*SELECT\s+(\*|\w+(?:\s*,\s*\w+)*)\s+FROM\s+("[^"]+"|[\w$.]+)' +
+  C_Cond = '\w+\s*(?:>=|<=|=|>|<)\s*(?::\w+|-?\d+(?:\.\d+)?)';
+  C_Col = '(?:\w+\.)?(?:\w+|\*)';
+  C_Pattern = '^\s*SELECT\s+(' + C_Col + '(?:\s*,\s*' + C_Col + ')*)\s+FROM\s+("[^"]+"|[\w$.]+)' +
+    '(?:\s+(?:AS\s+)?(?!WHERE\b|ORDER\b)(\w+))?' +
+    '(?:\s+WHERE\s+(' + C_Cond + '(?:\s+AND\s+' + C_Cond + ')*))?' +
     '(?:\s+ORDER\s+BY\s+(\w+(?:\s+ASC)?(?:\s*,\s*\w+(?:\s+ASC)?)*))?\s*;?\s*$';
+  C_CondParse = '(\w+)\s*(>=|<=|=|>|<)\s*(?::(\w+)|(-?\d+(?:\.\d+)?))';
 var
   oM: TMatch;
   oMC: TMatchCollection;
   oI: TMatch;
   i: Integer;
-  s: String;
+  s, sAlias: String;
   aItems: TArray<String>;
 begin
   Result := False;
   ATable := '';
   SetLength(ACols, 0);
   SetLength(AOrder, 0);
+  SetLength(AConds, 0);
   oM := TRegEx.Match(ASQL, C_Pattern, [roIgnoreCase]);
   if not oM.Success then
     Exit;
   ATable := oM.Groups[2].Value;
   if (Length(ATable) > 1) and (ATable[1] = '"') then
     ATable := Copy(ATable, 2, Length(ATable) - 2);
-  s := oM.Groups[1].Value;
-  if s <> '*' then begin
-    oMC := TRegEx.Matches(s, '\w+');
-    SetLength(ACols, oMC.Count);
-    for i := 0 to oMC.Count - 1 do
-      ACols[i] := oMC[i].Value;
+  sAlias := '';
+  if (oM.Groups.Count > 3) and (oM.Groups[3].Value <> '') then
+    sAlias := oM.Groups[3].Value;
+  // elenco campi: '*', 'A.*' (da solo) oppure campi semplici, con prefisso alias facoltativo
+  aItems := oM.Groups[1].Value.Split([',']);
+  SetLength(ACols, Length(aItems));
+  for i := 0 to High(aItems) do begin
+    oI := TRegEx.Match(Trim(aItems[i]), '^(?:(\w+)\.)?(\w+|\*)$');
+    if not oI.Success then
+      Exit;
+    if (oI.Groups[1].Value <> '') and not SameText(oI.Groups[1].Value, sAlias) then
+      Exit;
+    ACols[i] := oI.Groups[2].Value;
+    if ACols[i] = '*' then begin
+      if Length(aItems) > 1 then
+        Exit;
+      SetLength(ACols, 0);
+    end;
   end;
   // ORDER BY solo crescente (ASC facoltativo): il DESC resta al TQuery
-  if (oM.Groups.Count > 3) and oM.Groups[3].Success then begin
-    aItems := oM.Groups[3].Value.Split([',']);
+  if (oM.Groups.Count > 4) and (oM.Groups[4].Value <> '') then begin
+    // WHERE: condizioni semplici unite da AND (campo, operatore, :parametro o numero)
+    oMC := TRegEx.Matches(oM.Groups[4].Value, C_CondParse, [roIgnoreCase]);
+    SetLength(AConds, oMC.Count);
+    for i := 0 to oMC.Count - 1 do begin
+      AConds[i].Field := oMC[i].Groups[1].Value;
+      AConds[i].Op := oMC[i].Groups[2].Value;
+      AConds[i].Param := '';
+      AConds[i].Literal := Null;
+      AConds[i].Pos := -1;
+      // un gruppo non partecipante puo' risultare 'Success' con testo vuoto: si guarda il testo
+      if oMC[i].Groups[3].Value <> '' then
+        AConds[i].Param := oMC[i].Groups[3].Value
+      else if (oMC[i].Groups.Count > 4) and (oMC[i].Groups[4].Value <> '') then
+        AConds[i].Literal := StrToFloat(oMC[i].Groups[4].Value, TFormatSettings.Invariant)
+      else
+        Exit;
+    end;
+  end;
+  if (oM.Groups.Count > 5) and (oM.Groups[5].Value <> '') then begin
+    aItems := oM.Groups[5].Value.Split([',']);
     SetLength(AOrder, Length(aItems));
     for i := 0 to High(aItems) do begin
       oI := TRegEx.Match(Trim(aItems[i]), '^(\w+)(?:\s+ASC)?$', [roIgnoreCase]);
@@ -542,17 +596,17 @@ function TFDPhysBDECommand.TryPrepareTable: Boolean;
 var
   sTab, sIdx: String;
   aCols, aOrder, aF: TArray<String>;
+  aConds: TArray<TBDERangeCond>;
+  aEqIdx: TArray<Integer>;
   oTab: TTable;
   oDef: TIndexDef;
-  i, k: Integer;
+  i, k, p, iEq, iLo, iHi, nEq, nOth: Integer;
   bFound, bOk: Boolean;
 begin
   Result := False;
   if GetCommandKind <> skSelect then
     Exit;
-  if (GetParams <> nil) and (GetParams.Count > 0) then
-    Exit;
-  if not ParseSimpleSelect(FDbCommandText, sTab, aCols, aOrder) then
+  if not ParseSimpleSelect(FDbCommandText, sTab, aCols, aOrder, aConds) then
     Exit;
   oTab := TTable.Create(nil);
   try
@@ -597,6 +651,71 @@ begin
           raise Exception.Create('nessun indice per l''ORDER BY');
         oTab.IndexName := sIdx;
       end;
+      iEq := 0;
+      iLo := -1;
+      iHi := -1;
+      if Length(aConds) > 0 then begin
+        // WHERE: ammesso solo con ORDER BY, su campi numerici dell'ORDER BY:
+        // uguaglianze sui primi campi, poi al piu' un intervallo sul campo successivo
+        if Length(aOrder) = 0 then
+          raise Exception.Create('WHERE senza ORDER BY');
+        for i := 0 to High(aConds) do begin
+          p := -1;
+          for k := 0 to High(aOrder) do
+            if SameText(aConds[i].Field, aOrder[k]) then begin
+              p := k;
+              Break;
+            end;
+          if p < 0 then
+            raise Exception.Create('campo del WHERE fuori dall''ORDER BY');
+          aConds[i].Pos := p;
+          if not (oTab.FieldDefs[oTab.FieldDefs.IndexOf(aOrder[p])].DataType in
+             [ftSmallint, ftInteger, ftWord, ftFloat, ftCurrency, ftBCD, ftAutoInc, ftLargeint]) then
+            raise Exception.Create('campo non numerico nel WHERE');
+        end;
+        SetLength(aEqIdx, 0);
+        while iEq < Length(aOrder) do begin
+          nEq := 0;
+          nOth := 0;
+          p := -1;
+          for i := 0 to High(aConds) do
+            if aConds[i].Pos = iEq then
+              if aConds[i].Op = '=' then begin
+                Inc(nEq);
+                p := i;
+              end
+              else
+                Inc(nOth);
+          if (nEq = 1) and (nOth = 0) then begin
+            SetLength(aEqIdx, Length(aEqIdx) + 1);
+            aEqIdx[High(aEqIdx)] := p;
+            Inc(iEq);
+          end
+          else
+            Break;
+        end;
+        nOth := Length(aEqIdx);
+        if iEq < Length(aOrder) then
+          for i := 0 to High(aConds) do
+            if aConds[i].Pos = iEq then begin
+              if (aConds[i].Op = '>=') or (aConds[i].Op = '>') then begin
+                if iLo >= 0 then
+                  raise Exception.Create('due limiti inferiori');
+                iLo := i;
+                Inc(nOth);
+              end
+              else if (aConds[i].Op = '<=') or (aConds[i].Op = '<') then begin
+                if iHi >= 0 then
+                  raise Exception.Create('due limiti superiori');
+                iHi := i;
+                Inc(nOth);
+              end
+              else
+                raise Exception.Create('condizione non gestita');
+            end;
+        if nOth <> Length(aConds) then
+          raise Exception.Create('condizioni non gestite');
+      end;
     except
       // qualsiasi dubbio: si torna al TQuery, che riporta l'errore corretto
       FDFree(oTab);
@@ -605,6 +724,11 @@ begin
     FTable := oTab;
     FData := oTab;
     FColNames := aCols;
+    FConds := aConds;
+    FOrderFields := aOrder;
+    FEqIdx := aEqIdx;
+    FLoIdx := iLo;
+    FHiIdx := iHi;
     Result := True;
   except
     FDFree(oTab);
@@ -628,22 +752,8 @@ begin
       FFields.Add(FData.Fields[i]);
 end;
 
-procedure TFDPhysBDECommand.InternalPrepare;
+procedure TFDPhysBDECommand.CreateQuery;
 begin
-  FMetaPos := 0;
-  if GetMetaInfoKind <> mkNone then begin
-    // i metadati sono costruiti in InternalOpen
-    Exit;
-  end;
-  if GetCommandKind in [skStoredProc, skStoredProcWithCrs, skStoredProcNoCrs] then
-    FDCapabilityNotSupported(Self, [S_FD_LPhys, S_FD_BDEId]);
-
-  GenerateLimitSelect();
-  GenerateParamMarkers();
-
-  if BDEConnection.FTableCursor and TryPrepareTable then
-    Exit;
-
   FQuery := TQuery.Create(nil);
   FData := FQuery;
   try
@@ -661,12 +771,110 @@ begin
   end;
 end;
 
+// i valori dei parametri non permettono la TTable (nulli, non numerici): si usa il TQuery
+procedure TFDPhysBDECommand.SwitchToQuery;
+begin
+  FData := nil;
+  FDFreeAndNil(FTable);
+  SetLength(FColNames, 0);
+  SetLength(FConds, 0);
+  CreateQuery;
+end;
+
+function TFDPhysBDECommand.CondValue(AIdx: Integer; out AValue: Variant): Boolean;
+var
+  oFP: TFDParam;
+begin
+  Result := False;
+  AValue := Null;
+  if FConds[AIdx].Param <> '' then begin
+    if GetParams = nil then
+      Exit;
+    oFP := GetParams.FindParam(FConds[AIdx].Param);
+    if (oFP = nil) or oFP.IsNulls[0] then
+      Exit;
+    AValue := oFP.Values[0];
+  end
+  else
+    AValue := FConds[AIdx].Literal;
+  Result := VarIsNumeric(AValue);
+end;
+
+// Apre la TTable e applica l'intervallo del WHERE. False se i valori non sono utilizzabili
+// (la tabella non viene aperta).
+function TFDPhysBDECommand.SetupTableRange: Boolean;
+var
+  aEq: TArray<Variant>;
+  vLo, vHi: Variant;
+  i, n: Integer;
+begin
+  Result := False;
+  SetLength(aEq, Length(FEqIdx));
+  for i := 0 to High(FEqIdx) do
+    if not CondValue(FEqIdx[i], aEq[i]) then
+      Exit;
+  if (FLoIdx >= 0) and not CondValue(FLoIdx, vLo) then
+    Exit;
+  if (FHiIdx >= 0) and not CondValue(FHiIdx, vHi) then
+    Exit;
+  Result := True;
+  FTable.Close;
+  FTable.Open;
+  n := Length(aEq);
+  if (n > 0) or (FLoIdx >= 0) then begin
+    FTable.SetRangeStart;
+    for i := 0 to n - 1 do
+      FTable.FieldByName(FOrderFields[i]).Value := aEq[i];
+    if FLoIdx >= 0 then
+      FTable.FieldByName(FOrderFields[n]).Value := vLo;
+    FTable.KeyFieldCount := n + Ord(FLoIdx >= 0);
+    FTable.KeyExclusive := (FLoIdx >= 0) and (FConds[FLoIdx].Op = '>');
+  end;
+  if (n > 0) or (FHiIdx >= 0) then begin
+    FTable.SetRangeEnd;
+    for i := 0 to n - 1 do
+      FTable.FieldByName(FOrderFields[i]).Value := aEq[i];
+    if FHiIdx >= 0 then
+      FTable.FieldByName(FOrderFields[n]).Value := vHi;
+    FTable.KeyFieldCount := n + Ord(FHiIdx >= 0);
+    FTable.KeyExclusive := (FHiIdx >= 0) and (FConds[FHiIdx].Op = '<');
+  end;
+  if (n > 0) or (FLoIdx >= 0) or (FHiIdx >= 0) then
+    FTable.ApplyRange;
+end;
+
+procedure TFDPhysBDECommand.InternalPrepare;
+begin
+  FMetaPos := 0;
+  if GetMetaInfoKind <> mkNone then begin
+    // i metadati sono costruiti in InternalOpen
+    Exit;
+  end;
+  if GetCommandKind in [skStoredProc, skStoredProcWithCrs, skStoredProcNoCrs] then
+    FDCapabilityNotSupported(Self, [S_FD_LPhys, S_FD_BDEId]);
+
+  GenerateLimitSelect();
+  GenerateParamMarkers();
+
+  if BDEConnection.FTableCursor then begin
+    if TryPrepareTable then
+      Exit;
+    if (GetCommandKind = skSelect) and (Length(BDEStatRejectedSelects) < 4000) then
+      BDEStatRejectedSelects := BDEStatRejectedSelects + FDbCommandText + sLineBreak;
+  end;
+
+  CreateQuery;
+end;
+
 procedure TFDPhysBDECommand.InternalUnprepare;
 begin
   ClearMeta;
   FData := nil;
   FDFreeAndNil(FFields);
   SetLength(FColNames, 0);
+  SetLength(FConds, 0);
+  SetLength(FEqIdx, 0);
+  SetLength(FOrderFields, 0);
   FDFreeAndNil(FTable);
   FDFreeAndNil(FQuery);
 end;
@@ -728,11 +936,17 @@ begin
   end;
   try
     if FTable <> nil then begin
-      FTable.Close;
-      FTable.Open;
-      AtomicIncrement(BDEStatTableCursorOpens);
-    end
-    else begin
+      if Length(FConds) = 0 then begin
+        FTable.Close;
+        FTable.Open;
+        AtomicIncrement(BDEStatTableCursorOpens);
+      end
+      else if SetupTableRange then
+        AtomicIncrement(BDEStatTableCursorOpens)
+      else
+        SwitchToQuery;
+    end;
+    if FTable = nil then begin
       FQuery.Close;
       BindParams(0);
       FQuery.Open;
