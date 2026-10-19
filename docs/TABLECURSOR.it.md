@@ -148,6 +148,20 @@ Viene accettato anche un indice discendente o espressione con un `WHERE` (l'inte
 * Un campo che è parola riservata del Local SQL (per esempio `AUTOINC`) funziona con la TTable, mentre il TQuery lo rifiuta.
 * Se un parametro del `WHERE` è NULL o non numerico quando la query viene aperta, il driver passa al TQuery per quel comando.
 
+## Limitare le righe: `RecsMax` e paginazione
+
+Il Local SQL non ha `TOP`/`LIMIT`, quindi FireDAC applica `FetchOptions.RecsMax` e `RecsSkip` lato client.
+Il costo dipende dal cursore (tabella dBase da 452.873 righe, `RecsMax = 50`):
+
+| Query                              | Tempo per avere 50 righe |
+|------------------------------------|--------------------------|
+| `select *` con il `TQuery`         | 3.557 ms (il BDE copia prima tutto il risultato) |
+| `select *` con `TableCursor=True`  | 7 ms |
+| `... order by <campo indicizzato>` con `TableCursor=True` | 4 ms |
+
+Quindi per elenchi e griglie su tabelle grandi, `TableCursor=True` con `RecsMax` (o il fetch `fmOnDemand`) mostra
+subito le prime righe. Anche `RecsSkip` funziona, ma saltare le righe significa leggerle.
+
 ## Vedere le modifiche degli altri utenti
 
 Un `TFDQuery` tiene in memoria le righe lette, quindi una modifica fatta da un altro processo o da un'altra

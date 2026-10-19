@@ -146,6 +146,20 @@ it is opened. A descending or expression index is also accepted with a `WHERE` (
 * A field that is a Local SQL reserved word (for example `AUTOINC`) works through the TTable, while the TQuery rejects it.
 * If a parameter of a `WHERE` is NULL or not numeric when the query is opened, the driver switches to the TQuery for that command.
 
+## Limiting rows: `RecsMax` and paging
+
+The Local SQL has no `TOP`/`LIMIT`, so FireDAC applies `FetchOptions.RecsMax` and `RecsSkip` on the client. What
+that costs depends on the cursor (dBase table of 452,873 rows, `RecsMax = 50`):
+
+| Query                              | Time to get 50 rows |
+|------------------------------------|---------------------|
+| `select *` with the `TQuery`       | 3,557 ms (the BDE copies the whole result first) |
+| `select *` with `TableCursor=True` | 7 ms |
+| `... order by <indexed field>` with `TableCursor=True` | 4 ms |
+
+So for lists and grids on large tables, `TableCursor=True` with `RecsMax` (or `fmOnDemand` fetching) shows the first
+rows at once. `RecsSkip` works too, but skipping reads the skipped rows.
+
 ## Seeing other users' changes
 
 A `TFDQuery` keeps the rows it has fetched in memory, so a change made by another process or connection is not
