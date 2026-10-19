@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Fix: `FetchOptions.RecsMax` / `RecsSkip` (limit and paging) made FireDAC send `SELECT TOP n ...`, which Local SQL
+  rejects ("Invalid use of keyword"). The limit is now applied by FireDAC on the client; with `TableCursor` the
+  rows beyond the limit are not even read.
 - New runtime events `OnBDEIndexNeeded` and `OnBDESetRange` (class helpers on `TFDConnection`, with
   `TableCursor=True`): the program can choose the index for `ORDER BY` / `WHERE` on a single table (also `DESC`,
   `WHERE` without `ORDER BY`), set the range itself (text and date conditions included) or reject a query. Without

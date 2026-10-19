@@ -1118,8 +1118,9 @@ begin
   end;
 end;
 
-// Diagnostica: FetchOptions.RecsMax (e quindi la paginazione) non genera SQL valido per il Local SQL?
-// Stampa il testo SQL arrivato al TQuery del BDE, se l'apertura fallisce.
+// FetchOptions.RecsMax / RecsSkip (limite e paginazione): il Local SQL non ha TOP/LIMIT,
+// quindi il limite deve essere applicato da FireDAC lato client.
+// Se l'apertura fallisce stampa il testo SQL arrivato al BDE.
 procedure TestRecsMax;
 const
   C_Max = 50;
@@ -1127,31 +1128,43 @@ var
   C2: TFDConnection;
   Q: TFDQuery;
   n: Integer;
+  k0, k1, k2: Variant;
+  SW: TStopwatch;
+  bOk: Boolean;
 
   procedure Try1(AConn: TFDConnection; const ALabel, ASQL: String);
+  var
+    ms: Int64;
   begin
     Q.Close;
     Q.Connection := AConn;
     Q.FetchOptions.RecsMax := C_Max;
     BDEStatLastSQL := '';
     try
+      SW := TStopwatch.StartNew;
       Q.Open(ASQL);
       n := 0;
       while not Q.Eof do begin
         Inc(n);
         Q.Next;
       end;
+      ms := SW.ElapsedMilliseconds;
       Q.Close;
-      Write('(', ALabel, ': RecsMax=', C_Max, ' -> ', n, ' righe) ');
+      Write('(', ALabel, ': RecsMax=', C_Max, ' -> ', n, ' righe in ', ms, ' ms) ');
+      if n <> C_Max then
+        bOk := False;
     except
-      on E: Exception do
+      on E: Exception do begin
+        bOk := False;
         Write('(', ALabel, ': RecsMax=', C_Max, ' NON funziona: ', Copy(E.Message, 1, 70),
           ' | SQL inviato al BDE: ', BDEStatLastSQL, ') ');
+      end;
     end;
     Q.FetchOptions.RecsMax := -1;
   end;
 
 begin
+  bOk := True;
   C2 := TFDConnection.Create(nil);
   Q := TFDQuery.Create(nil);
   try
@@ -1164,6 +1177,35 @@ begin
     Try1(C2, 'TableCursor', 'select * from ' + SqlTab);
     if KeyField <> '' then
       Try1(C2, 'TableCursor con order by', 'select * from ' + SqlTab + ' order by ' + KeyField);
+    // RecsSkip: la prima riga dopo lo skip e' la terza riga della lettura normale
+    Q.Connection := C2;
+    Q.FetchOptions.RecsSkip := -1;
+    Q.Open('select * from ' + SqlTab);
+    k0 := Q.Fields[0].Value;
+    Q.Next;
+    k1 := Q.Fields[0].Value;
+    Q.Next;
+    k2 := Q.Fields[0].Value;
+    Q.Close;
+    Q.FetchOptions.RecsSkip := 2;
+    try
+      Q.Open('select * from ' + SqlTab);
+      if Q.Eof or (Q.Fields[0].Value <> k2) then begin
+        bOk := False;
+        Write('(RecsSkip=2: prima riga diversa dalla terza della lettura normale) ');
+      end
+      else
+        Write('(RecsSkip=2: ok) ');
+    except
+      on E: Exception do begin
+        bOk := False;
+        Write('(RecsSkip=2 NON funziona: ', Copy(E.Message, 1, 70), ') ');
+      end;
+    end;
+    Q.Close;
+    Q.FetchOptions.RecsSkip := -1;
+    if not bOk then
+      raise Exception.Create('RecsMax / RecsSkip non applicati correttamente');
   finally
     Q.Free;
     C2.Free;

@@ -1076,7 +1076,9 @@ begin
   if GetCommandKind in [skStoredProc, skStoredProcWithCrs, skStoredProcNoCrs] then
     FDCapabilityNotSupported(Self, [S_FD_LPhys, S_FD_BDEId]);
 
-  GenerateLimitSelect();
+  // Niente GenerateLimitSelect: il Local SQL non ha TOP/LIMIT (FireDAC genererebbe
+  // 'SELECT TOP n * FROM (...)', rifiutato dal BDE). RecsMax e RecsSkip li applica FireDAC
+  // lato client; con il cursore TTable le righe oltre il limite non vengono nemmeno lette.
   GenerateParamMarkers();
 
   if BDEConnection.FTableCursor then begin
