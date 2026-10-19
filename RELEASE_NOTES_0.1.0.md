@@ -6,6 +6,7 @@ reads and writes legacy BDE tables (dBase III/IV, Paradox 7+) with `TFDConnectio
 - Reading and writing of DBF and Paradox, memo/BLOB included; record locks mapped to `ekRecordLocked`.
 - Local SQL aware: reserved words and escape functions (`UCASE`, `SUBSTRING`, `CONVERT`, `YEAR`, ...).
 - Private temp folder per connection; `LockRetry`, `NetFileDir`, `PrivateDir` parameters.
+- Optional `TableCursor=True`: plain `select`, `order by` on an index and numeric key-range `where` are read through a BDE `TTable`; large tables open in milliseconds instead of seconds (see `docs/TABLECURSOR.md`).
 - Packages for Delphi 13.2, `build.bat` / `test.bat`, console test program and sample data.
 
 **Requirements:** Delphi 13.2 (other versions untested), BDE installed, Win32.
