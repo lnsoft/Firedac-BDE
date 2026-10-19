@@ -129,7 +129,7 @@ query sorgente con `WHERE` su indice, non ancora provato) e usa il Local SQL per
 Aprire la tabella delle righe con una `TQuery` costa 3,4 s; un `TTable` si apre subito. Come sorgente del
 Local SQL, però, il `TTable` costa circa 6,7 s per query su questa tabella (un passaggio su 452.873 righe
 con la navigazione del BDE). Lo stesso join per un solo documento richiede 992 ms nel Local SQL del BDE, quindi nemmeno il BDE usa
-una ricerca su indice. Un semplice `select * from DocD00 where NUMERO = :k` attraverso il driver restituisce le 3 righe di un documento in 8 ms
+una ricerca su indice. Un semplice `select * from DETAIL where NUMERO = :k` attraverso il driver restituisce le 3 righe di un documento in 8 ms
 (BDE nativo: 4 ms): per un WHERE semplice il BDE usa l'indice; solo l'apertura dell'intera tabella e i join costano un passaggio completo.
 Per l'accesso a un singolo documento usa un percorso indicizzato (`TFDTable` con
 `MasterSource`/`MasterFields`, oppure un `WHERE` su campo indicizzato dentro il BDE) e tieni il Local SQL per i

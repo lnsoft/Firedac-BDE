@@ -21,7 +21,7 @@ FDConnection1.Params.Values['TableCursor'] := 'True';
 
 ## Measurements
 
-`DocD00.DBF`, 452,873 rows, Delphi 13.2, local disk:
+A dBase table (`DETAIL.DBF`, 452,873 rows, 32 fields), Delphi 13.2, local disk:
 
 | Operation                                                         | TQuery   | TTable  |
 |-------------------------------------------------------------------|----------|---------|
@@ -32,7 +32,7 @@ FDConnection1.Params.Values['TableCursor'] := 'True';
 | `where NUMERO > x order by NUMERO` (292,996 rows)                 | 2,402 ms | 5 ms    |
 | `where NUMERO < x order by NUMERO` (159,875 rows)                 | 1,304 ms | 5 ms    |
 
-A Paradox table (`Scadenze.DB`, 13,898 rows, text primary key): `order by` the key uses the TTable and returns
+A Paradox table (13,898 rows, text primary key): `order by` the key uses the TTable and returns
 every field identical to the TQuery result.
 
 ### Master-detail (300 headers, 2,625 detail rows, detail table 452,873 rows)
@@ -48,7 +48,7 @@ parameter** and `TableCursor=True`: each header then costs about 3 ms.
 
 ## Where the time goes when you read every row
 
-Reading all 452,873 rows x 32 fields of `DocD00` takes 3.3 s with FireDAC and `TableCursor`. A raw BDE `TTable` loop
+Reading all 452,873 rows x 32 fields of the detail table takes 3.3 s with FireDAC and `TableCursor`. A raw BDE `TTable` loop
 needs 0.25 s just to walk the cursor and 2.5 s to read the 32 fields (the same with `Variant` or typed accessors), so
 about three quarters of the time is the BDE reading field values; FireDAC and the driver add about 0.8 s. Reading
 only the fields you need (`select NUMERO, RIGA, QTA from ...`) cuts the cost in proportion.

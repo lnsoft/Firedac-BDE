@@ -123,7 +123,7 @@ an indexed `WHERE`, not yet tested) and use Local SQL to combine the reduced set
 Opening the detail table through a `TQuery` costs 3.4 s; a `TTable` opens at once. As a Local SQL source,
 however, `TTable` costs about 6.7 s per query on this table (one pass over 452,873 rows through BDE
 navigation). The same single-document join takes 992 ms in the BDE's own Local SQL, so the BDE does not use an index lookup for it
-either. A simple `select * from DocD00 where NUMERO = :k` through the driver returns the 3 rows of a document in 8 ms (BDE native: 4 ms),
+either. A simple `select * from DETAIL where NUMERO = :k` through the driver returns the 3 rows of a document in 8 ms (BDE native: 4 ms),
 so the BDE does use the index for a plain WHERE; only whole-table opens and joins pay a full pass.
 For per-document access use an indexed path (`TFDTable` with `MasterSource`/`MasterFields`, or a
 `WHERE` on an indexed field inside the BDE), and keep Local SQL for whole-table reports.

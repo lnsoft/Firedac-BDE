@@ -22,7 +22,7 @@ FDConnection1.Params.Values['TableCursor'] := 'True';
 
 ## Misure
 
-`DocD00.DBF`, 452.873 righe, Delphi 13.2, disco locale:
+Una tabella dBase (`DETAIL.DBF`, 452.873 righe, 32 campi), Delphi 13.2, disco locale:
 
 | Operazione                                                        | TQuery   | TTable  |
 |-------------------------------------------------------------------|----------|---------|
@@ -33,7 +33,7 @@ FDConnection1.Params.Values['TableCursor'] := 'True';
 | `where NUMERO > x order by NUMERO` (292.996 righe)                | 2.402 ms | 5 ms    |
 | `where NUMERO < x order by NUMERO` (159.875 righe)                | 1.304 ms | 5 ms    |
 
-Tabella Paradox (`Scadenze.DB`, 13.898 righe, chiave primaria di testo): l'`order by` sulla chiave usa la TTable
+Tabella Paradox (13.898 righe, chiave primaria di testo): l'`order by` sulla chiave usa la TTable
 e restituisce tutti i campi identici al risultato del TQuery.
 
 ### Master-detail (300 testate, 2.625 righe di dettaglio, tabella di dettaglio da 452.873 righe)
@@ -49,7 +49,7 @@ vede solo `SELECT A.* FROM ... A`), quindi resta lento. Per il master-detail su 
 
 ## Dove va il tempo quando si leggono tutte le righe
 
-Leggere tutte le 452.873 righe x 32 campi di `DocD00` richiede 3,3 s con FireDAC e `TableCursor`. Un ciclo grezzo su
+Leggere tutte le 452.873 righe x 32 campi della tabella di dettaglio richiede 3,3 s con FireDAC e `TableCursor`. Un ciclo grezzo su
 una `TTable` del BDE impiega 0,25 s solo per scorrere il cursore e 2,5 s per leggere i 32 campi (lo stesso con
 `Variant` o con accessi tipizzati): circa tre quarti del tempo è il BDE che legge i valori; FireDAC e il driver
 aggiungono circa 0,8 s. Leggere solo i campi che servono (`select NUMERO, RIGA, QTA from ...`) riduce il costo in proporzione.
