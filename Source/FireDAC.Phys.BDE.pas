@@ -961,6 +961,7 @@ begin
     FQuery.SessionName := BDEConnection.FSession.SessionName;
     FQuery.Unidirectional := True;
     FQuery.SQL.Text := FDbCommandText;
+    BDEStatLastSQL := FDbCommandText;
     FQuery.Prepare;
   except
     on E: EDBEngineError do begin

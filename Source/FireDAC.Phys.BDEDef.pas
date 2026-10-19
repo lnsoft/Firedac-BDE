@@ -91,6 +91,8 @@ var
   BDEStatTableCursorOpens: Integer = 0;
   // diagnostica (test): testi delle SELECT che TableCursor non ha riconosciuto (max ~4000 caratteri)
   BDEStatRejectedSelects: String = '';
+  // diagnostica (test): ultimo testo SQL passato al TQuery del BDE
+  BDEStatLastSQL: String = '';
 
 type
   TFDPhysBDEConnectionDefParams = class(TFDConnectionDefParams)

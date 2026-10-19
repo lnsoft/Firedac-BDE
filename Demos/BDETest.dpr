@@ -1118,6 +1118,177 @@ begin
   end;
 end;
 
+// Diagnostica: FetchOptions.RecsMax (e quindi la paginazione) non genera SQL valido per il Local SQL?
+// Stampa il testo SQL arrivato al TQuery del BDE, se l'apertura fallisce.
+procedure TestRecsMax;
+const
+  C_Max = 50;
+var
+  C2: TFDConnection;
+  Q: TFDQuery;
+  n: Integer;
+
+  procedure Try1(AConn: TFDConnection; const ALabel, ASQL: String);
+  begin
+    Q.Close;
+    Q.Connection := AConn;
+    Q.FetchOptions.RecsMax := C_Max;
+    BDEStatLastSQL := '';
+    try
+      Q.Open(ASQL);
+      n := 0;
+      while not Q.Eof do begin
+        Inc(n);
+        Q.Next;
+      end;
+      Q.Close;
+      Write('(', ALabel, ': RecsMax=', C_Max, ' -> ', n, ' righe) ');
+    except
+      on E: Exception do
+        Write('(', ALabel, ': RecsMax=', C_Max, ' NON funziona: ', Copy(E.Message, 1, 70),
+          ' | SQL inviato al BDE: ', BDEStatLastSQL, ') ');
+    end;
+    Q.FetchOptions.RecsMax := -1;
+  end;
+
+begin
+  C2 := TFDConnection.Create(nil);
+  Q := TFDQuery.Create(nil);
+  try
+    C2.DriverName := 'BDE';
+    C2.LoginPrompt := False;
+    C2.Params.Database := Folder;
+    C2.Params.Values['TableCursor'] := 'True';
+    C2.Open;
+    Try1(Conn, 'TQuery', 'select * from ' + SqlTab);
+    Try1(C2, 'TableCursor', 'select * from ' + SqlTab);
+    if KeyField <> '' then
+      Try1(C2, 'TableCursor con order by', 'select * from ' + SqlTab + ' order by ' + KeyField);
+  finally
+    Q.Free;
+    C2.Free;
+  end;
+end;
+
+// Misura (non verifica): TTable.Filter del BDE contro il WHERE del TQuery.
+//  A) condizione selettiva sul campo testo, senza indice: righe e tempi
+//  B) intervallo sulla chiave (SetRange) + filtro sul testo
+//  C) condizione poco selettiva: tempo per avere le prime righe (apertura + 50 righe)
+procedure TestFilterProbe;
+const
+  FIRST_ROWS = 50;
+var
+  Q: TFDQuery;
+  T: TTable;
+  SW: TStopwatch;
+  sTxt, sFlt: String;
+  vKey: Double;
+  nQ, nT, n: Integer;
+  msQ, msT: Int64;
+
+  function Lit(const AValue: String): String;
+  begin
+    Result := '''' + StringReplace(AValue, '''', '''''', [rfReplaceAll]) + '''';
+  end;
+
+begin
+  if not ((not VarIsNull(FirstKey)) and (not VarIsEmpty(FirstKey)) and VarIsNumeric(FirstKey)) then begin
+    Write('(saltato: serve una chiave numerica) ');
+    Exit;
+  end;
+  vKey := FirstKey;
+  Q := TFDQuery.Create(nil);
+  T := TTable.Create(nil);
+  try
+    Q.Connection := Conn;
+    T.DatabaseName := Folder;
+    T.TableName := TabName;
+    T.ReadOnly := True;
+    // un valore di testo non vuoto preso dalle prime righe
+    sTxt := '';
+    Q.FetchOptions.Mode := fmOnDemand;
+    Q.Open('select * from ' + SqlTab);
+    n := 0;
+    while (not Q.Eof) and (sTxt = '') and (n < 200) do begin
+      sTxt := Trim(Q.FieldByName(TextField).AsString);
+      Inc(n);
+      Q.Next;
+    end;
+    Q.Close;
+    Q.FetchOptions.Mode := fmAll;
+    if sTxt = '' then begin
+      Write('(saltato: nessun valore di testo non vuoto nelle prime righe) ');
+      Exit;
+    end;
+    sFlt := TextField + ' = ' + Lit(sTxt);
+
+    // A) condizione selettiva sul testo, senza indice
+    SW := TStopwatch.StartNew;
+    Q.Open('select * from ' + SqlTab + ' where ' + TextField + ' = :t', [sTxt]);
+    nQ := 0;
+    while not Q.Eof do begin Inc(nQ); Q.Next; end;
+    Q.Close;
+    msQ := SW.ElapsedMilliseconds;
+    T.Filter := sFlt;
+    T.Filtered := True;
+    SW := TStopwatch.StartNew;
+    T.Open;
+    nT := 0;
+    while not T.Eof do begin Inc(nT); T.Next; end;
+    T.Close;
+    msT := SW.ElapsedMilliseconds;
+    Write('(A: ', TextField, ' = "', sTxt, '": TQuery ', msQ, ' ms = ', nQ, ' righe; TTable.Filter ',
+      msT, ' ms = ', nT, ' righe', IfThen(nQ = nT, ', uguali', ', DIVERSE'), ') ');
+
+    // B) SetRange sulla chiave + filtro sul testo
+    SW := TStopwatch.StartNew;
+    Q.Open('select * from ' + SqlTab + ' where ' + KeyField + ' >= :k and ' + TextField + ' = :t',
+      [vKey, sTxt]);
+    nQ := 0;
+    while not Q.Eof do begin Inc(nQ); Q.Next; end;
+    Q.Close;
+    msQ := SW.ElapsedMilliseconds;
+    T.IndexFieldNames := KeyField;
+    T.Filter := sFlt;
+    T.Filtered := True;
+    SW := TStopwatch.StartNew;
+    T.Open;
+    T.SetRangeStart;
+    T.FieldByName(KeyField).Value := vKey;
+    T.ApplyRange;
+    nT := 0;
+    while not T.Eof do begin Inc(nT); T.Next; end;
+    T.Close;
+    msT := SW.ElapsedMilliseconds;
+    Write('(B: ', KeyField, ' >= chiave e ', TextField, ' = ...: TQuery ', msQ, ' ms = ', nQ,
+      ' righe; SetRange + Filter ', msT, ' ms = ', nT, ' righe', IfThen(nQ = nT, ', uguali', ', DIVERSE'), ') ');
+
+    // C) condizione poco selettiva: tempo fino alle prime righe
+    T.IndexFieldNames := '';
+    T.Filter := TextField + ' <> ' + Lit(sTxt);
+    T.Filtered := True;
+    Q.FetchOptions.Mode := fmOnDemand;
+    SW := TStopwatch.StartNew;
+    Q.Open('select * from ' + SqlTab + ' where ' + TextField + ' <> :t', [sTxt]);
+    n := 0;
+    while (not Q.Eof) and (n < FIRST_ROWS) do begin Inc(n); Q.Next; end;
+    Q.Close;
+    msQ := SW.ElapsedMilliseconds;
+    Q.FetchOptions.Mode := fmAll;
+    SW := TStopwatch.StartNew;
+    T.Open;
+    nT := 0;
+    while (not T.Eof) and (nT < FIRST_ROWS) do begin Inc(nT); T.Next; end;
+    T.Close;
+    msT := SW.ElapsedMilliseconds;
+    Write('(C: prime ', FIRST_ROWS, ' righe di ', TextField, ' <> "', sTxt, '": TQuery (fmOnDemand) ', msQ,
+      ' ms (', n, ' righe); TTable.Filter ', msT, ' ms (', nT, ' righe)) ');
+  finally
+    T.Free;
+    Q.Free;
+  end;
+end;
+
 // Misura: ORDER BY sul campo chiave con TQuery (via driver) contro una TTable del BDE
 // con IndexFieldNames. Serve a decidere se vale la pena usare la TTable per gli ORDER BY.
 procedure TestOrderBy;
@@ -1777,6 +1948,9 @@ begin
         Run('Misura costi: count(*), Prepare, riapertura nel master-detail', TestCostProbe);
       if (KeyField <> '') and (TextField <> '') then
         Run('Visibilita'' delle modifiche tra processi (scrive: usare una COPIA)', TestVisibility);
+      if (KeyField <> '') and (TextField <> '') then
+        Run('Misura: TTable.Filter contro WHERE del TQuery', TestFilterProbe);
+      Run('Diagnostica: RecsMax (limite di righe) con il driver', TestRecsMax);
       if KeyField <> '' then
         Run('Misura ORDER BY: TQuery contro TTable con indice', TestOrderBy);
       if KeyField <> '' then
