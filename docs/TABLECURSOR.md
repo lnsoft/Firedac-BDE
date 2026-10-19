@@ -46,6 +46,13 @@ A `TFDTable` detail makes FireDAC read the whole detail table and filter it in m
 `SELECT A.* FROM ... A`), so it stays slow. For master-detail on big tables use a **`TFDQuery` detail with a
 parameter** and `TableCursor=True`: each header then costs about 3 ms.
 
+## Where the time goes when you read every row
+
+Reading all 452,873 rows x 32 fields of `DocD00` takes 3.3 s with FireDAC and `TableCursor`. A raw BDE `TTable` loop
+needs 0.25 s just to walk the cursor and 2.5 s to read the 32 fields (the same with `Variant` or typed accessors), so
+about three quarters of the time is the BDE reading field values; FireDAC and the driver add about 0.8 s. Reading
+only the fields you need (`select NUMERO, RIGA, QTA from ...`) cuts the cost in proportion.
+
 ## Differences from the TQuery
 
 * The TTable is a **live** cursor: rows changed by other users while you read may show up; a TQuery works on a copy.

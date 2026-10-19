@@ -601,6 +601,105 @@ begin
   end;
 end;
 
+// Misura il costo della lettura riga per riga: BDE grezzo (TTable: solo cursore, campi letti con
+// Variant, campi letti con accessi tipizzati) contro FireDAC (TFDQuery + TableCursor, FetchAll).
+// La differenza dice quanto costano FireDAC e il driver rispetto al BDE stesso.
+procedure TestFetchCost;
+const
+  C_NoRead = [ftMemo, ftWideMemo, ftFmtMemo, ftBlob, ftGraphic, ftTypedBinary, ftBytes, ftVarBytes];
+var
+  C2: TFDConnection;
+  Q: TFDQuery;
+  T: TTable;
+  SW: TStopwatch;
+  msCur, msVar, msTyp, msFD: Int64;
+  n, nFD, i, k: Integer;
+  v: Variant;
+  f, dSink: Double;
+  sv: String;
+  fld: TField;
+begin
+  dSink := 0;
+  T := TTable.Create(nil);
+  try
+    T.DatabaseName := Folder;
+    T.TableName := TabName;
+    T.ReadOnly := True;
+    // 1. solo il cursore
+    T.Open;
+    SW := TStopwatch.StartNew;
+    n := 0;
+    while not T.Eof do begin
+      Inc(n);
+      T.Next;
+    end;
+    msCur := SW.ElapsedMilliseconds;
+    T.Close;
+    // 2. tutti i campi con Value (Variant), come fa oggi il driver
+    T.Open;
+    SW := TStopwatch.StartNew;
+    while not T.Eof do begin
+      for i := 0 to T.FieldCount - 1 do begin
+        fld := T.Fields[i];
+        if (not (fld.DataType in C_NoRead)) and (not fld.IsNull) then begin
+          v := fld.Value;
+          if VarIsNumeric(v) then
+            dSink := dSink + 1;
+        end;
+      end;
+      T.Next;
+    end;
+    msVar := SW.ElapsedMilliseconds;
+    T.Close;
+    // 3. tutti i campi con accessi tipizzati
+    T.Open;
+    SW := TStopwatch.StartNew;
+    while not T.Eof do begin
+      for i := 0 to T.FieldCount - 1 do begin
+        fld := T.Fields[i];
+        if (not (fld.DataType in C_NoRead)) and (not fld.IsNull) then
+          case fld.DataType of
+          ftFloat, ftCurrency, ftBCD: begin f := fld.AsFloat; dSink := dSink + f; end;
+          ftSmallint, ftInteger, ftWord, ftAutoInc, ftLargeint: begin k := fld.AsInteger; dSink := dSink + k; end;
+          ftString, ftWideString, ftFixedChar, ftFixedWideChar: begin sv := fld.AsString; dSink := dSink + Length(sv); end;
+          ftBoolean: if fld.AsBoolean then dSink := dSink + 1;
+          ftDate, ftTime, ftDateTime, ftTimeStamp: dSink := dSink + fld.AsDateTime;
+          end;
+      end;
+      T.Next;
+    end;
+    msTyp := SW.ElapsedMilliseconds;
+    T.Close;
+  finally
+    T.Free;
+  end;
+  // 4. FireDAC con TableCursor (cursore TTable + conversione in FireDAC)
+  C2 := TFDConnection.Create(nil);
+  Q := TFDQuery.Create(nil);
+  try
+    C2.DriverName := 'BDE';
+    C2.LoginPrompt := False;
+    C2.Params.Database := Folder;
+    C2.Params.Values['TableCursor'] := 'True';
+    C2.Open;
+    Q.Connection := C2;
+    SW := TStopwatch.StartNew;
+    Q.Open('select * from ' + SqlTab);
+    Q.FetchAll;
+    nFD := Q.RecordCount;
+    msFD := SW.ElapsedMilliseconds;
+  finally
+    Q.Free;
+    C2.Free;
+  end;
+  Write('(', n, ' righe; BDE grezzo: solo cursore ', msCur, ' ms, campi con Variant ', msVar,
+    ' ms, campi tipizzati ', msTyp, ' ms; FireDAC FetchAll con TableCursor ', msFD, ' ms)');
+  if dSink < 0 then
+    Write(' ');
+  if nFD <> n then
+    raise Exception.CreateFmt('Righe diverse: BDE %d, FireDAC %d', [n, nFD]);
+end;
+
 procedure TestEscapes;
 var
   sW: String;
@@ -1019,6 +1118,7 @@ begin
       Run('TFDTable e Locate', TestTable);
       Run('Funzioni escape Local SQL', TestEscapes);
       Run('Parametro TableCursor (select semplici con TTable)', TestTableCursor);
+      Run('Costo di lettura: BDE grezzo contro FireDAC', TestFetchCost);
       if KeyField <> '' then
         Run('Misura ORDER BY: TQuery contro TTable con indice', TestOrderBy);
       if KeyField <> '' then

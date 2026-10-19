@@ -47,6 +47,13 @@ Con un `TFDTable` come dettaglio FireDAC legge tutta la tabella di dettaglio e l
 vede solo `SELECT A.* FROM ... A`), quindi resta lento. Per il master-detail su tabelle grandi usa un
 **dettaglio `TFDQuery` con parametro** e `TableCursor=True`: ogni testata costa circa 3 ms.
 
+## Dove va il tempo quando si leggono tutte le righe
+
+Leggere tutte le 452.873 righe x 32 campi di `DocD00` richiede 3,3 s con FireDAC e `TableCursor`. Un ciclo grezzo su
+una `TTable` del BDE impiega 0,25 s solo per scorrere il cursore e 2,5 s per leggere i 32 campi (lo stesso con
+`Variant` o con accessi tipizzati): circa tre quarti del tempo è il BDE che legge i valori; FireDAC e il driver
+aggiungono circa 0,8 s. Leggere solo i campi che servono (`select NUMERO, RIGA, QTA from ...`) riduce il costo in proporzione.
+
 ## Differenze rispetto al TQuery
 
 * La TTable è un cursore **vivo**: righe modificate da altri utenti durante la lettura possono comparire; il TQuery lavora su una copia.
