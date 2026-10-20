@@ -705,7 +705,7 @@ var
   oDef: TIndexDef;
   oUserExc: Exception;
   i, k, p, iEq, iLo, iHi, nEq, nOth: Integer;
-  bOk, bDesc, bHook, bSet, bAccept, bRangeHook, bNonNum, bStd: Boolean;
+  bOk, bDesc, bHook, bSet, bAccept, bRangeHook, bNonNum, bStd, bExprProp: Boolean;
 begin
   Result := False;
   if GetCommandKind <> skSelect then
@@ -733,7 +733,8 @@ begin
       SetLength(aSeq, 0);
       aKey := aOrder;
       if (Length(aOrder) = 0) and (Length(aConds) > 0) then begin
-        if not bHook then
+        // WHERE senza ORDER BY: solo se il programma ha almeno un evento (la scelta e' sua)
+        if not bHook and not bRangeHook then
           raise Exception.Create('WHERE senza ORDER BY');
         bSet := True;
         SetLength(aKey, 0);
@@ -777,12 +778,32 @@ begin
             aRngN[High(aRngN)] := aConds[i].Field;
           end;
         oDef := nil;
-        if BDEFindIndex(oTab.IndexDefs, aEqN, aRngN, aOrder, bDesc, oMatch) then
+        bExprProp := False;
+        // con OnBDESetRange e senza ORDER BY si propongono anche gli indici espressione fatti di
+        // campi di testo (ANNO+TIPODOC+NUMDOC): l'intervallo lo imposta il programma
+        bOk := BDEFindIndex(oTab.IndexDefs, aEqN, aRngN, aOrder, bDesc,
+          bRangeHook and (Length(aOrder) = 0), oMatch);
+        if bOk then begin
           oDef := FindIndexByName(oTab, oMatch.IndexName);
+          if (oDef <> nil) and oMatch.IsExpression then begin
+            bExprProp := True;
+            for i := 0 to High(oMatch.Fields) do begin
+              k := oTab.FieldDefs.IndexOf(oMatch.Fields[i]);
+              // con campi numerici '+' e' una somma, non una chiave concatenata
+              if (k < 0) or not (oTab.FieldDefs[k].DataType in [ftString, ftFixedChar, ftWideString]) then begin
+                oDef := nil;
+                bExprProp := False;
+                Break;
+              end;
+            end;
+          end;
+        end;
         if bHook then begin
           // il programma puo' cambiare l'indice o rifiutare; senza proposta (anche per i campi
-          // non numerici) l'accettazione parte da False: il comportamento standard
-          if bNonNum then
+          // non numerici) l'accettazione parte da False: il comportamento standard.
+          // Per un indice espressione la proposta resta anche con campi di testo: la chiave
+          // la costruisce OnBDESetRange
+          if bNonNum and not bExprProp then
             oDef := nil;
           sIdx := '';
           if oDef <> nil then

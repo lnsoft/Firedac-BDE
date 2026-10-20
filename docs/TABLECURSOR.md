@@ -144,6 +144,16 @@ it is opened. A descending or expression index is also accepted with a `WHERE` (
 - Text fields are compared as stored: `NUMDOC` is right-aligned with leading spaces, so the value must be
   `'                   245/12'`; the `TQuery` behaves the same (`NUMDOC = '245/12'` finds nothing).
 
+**Proposal and event.** With `OnBDESetRange` assigned, a `WHERE` without `ORDER BY` on the first fields of an
+expression index made only of **text** fields joined by `+` (`ANNO+TIPODOC+NUMDOC`) is served by the `TTable`: the
+driver proposes that index (`Accept = True` in `OnBDEIndexNeeded`, which you may change or refuse) and calls
+`OnBDESetRange` with all the conditions, whatever they are (text, partial key, ranges), so the key is yours to
+build. Without `OnBDESetRange` nothing changes (`TQuery`). The proposal is not made for expressions with
+functions (`STR(N,5)+X`, `UPPER(A)`), for numeric fields (`+` would be a sum), or together with an `ORDER BY`
+(the order of a concatenated key equals the order of the fields only for text fields: choose the index yourself
+in `OnBDEIndexNeeded`). `BDEExpressionFields(ADef)` and the `AExpressions` form of `BDEFindIndex` expose the same
+logic.
+
 A handler for the full key only:
 
 ```pascal

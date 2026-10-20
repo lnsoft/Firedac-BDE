@@ -22,7 +22,6 @@ program BDETest;
 {$APPTYPE CONSOLE}
 
 uses
-  FixBDE4GbBug,
   Winapi.Windows, System.SysUtils, System.Classes, System.Diagnostics, System.Variants,
   System.StrUtils, System.IOUtils,
   Data.DB, BDE, Bde.DBTables,
@@ -1396,6 +1395,17 @@ begin
     D.Add('IX_EXPR', 'UPPER(A)', [ixExpression]);
     D.Add('IX_CI', 'D', [ixCaseInsensitive]);
     D.Add('IX_D', 'D', []);
+    // indici espressione dBase come li riporta il BDE: Fields vuoto, testo in Expression
+    with D.AddIndexDef do begin
+      Name := 'IX_EFG';
+      Options := [ixExpression];
+      Expression := 'E+F+G';
+    end;
+    with D.AddIndexDef do begin
+      Name := 'IX_FUNC';
+      Options := [ixExpression];
+      Expression := 'STR(H,5)+I';
+    end;
 
     // A=1 AND B>5: serve (A,B); (B,A) viene prima ma non va bene per il SetRange
     Chk('A=, B>', BDEFindIndex(D, ['A'], ['B'], [], False, M), 'IX_AB', ilFull);
@@ -1426,6 +1436,35 @@ begin
     Chk('elenco A,B ordinato', BDEFindIndex(D, ['A', 'B'], False, False, M), 'IX_AB', ilFull);
     Chk('elenco B,A ordinato', BDEFindIndex(D, ['B', 'A'], False, False, M), 'IX_BA', ilFull);
     Chk('elenco C,B qualunque', BDEFindIndex(D, ['C', 'B'], False, True, M), '', ilNone);
+    // indici espressione fatti di soli campi (E+F+G): solo se richiesti (AExpressions) e senza ORDER BY
+    Chk('expr non richiesti', BDEFindIndex(D, ['E'], [], [], False, False, M), '', ilNone);
+    Chk('expr E=', BDEFindIndex(D, ['E'], [], [], False, True, M), 'IX_EFG', ilFull);
+    if not M.IsExpression then begin
+      Inc(nBad);
+      sBad := sBad + ' [expr E=: IsExpression atteso True]';
+    end;
+    Chk('expr F= (non e'' il primo campo)', BDEFindIndex(D, ['F'], [], [], False, True, M), '', ilNone);
+    Chk('expr G,F,E= qualunque ordine', BDEFindIndex(D, ['G', 'F', 'E'], [], [], False, True, M),
+      'IX_EFG', ilFull);
+    Chk('expr E=, F>', BDEFindIndex(D, ['E'], ['F'], [], False, True, M), 'IX_EFG', ilFull);
+    // con ORDER BY l'indice espressione non si propone (nessun indice semplice serve ORDER BY F)
+    Chk('expr con ORDER BY', BDEFindIndex(D, [], ['F'], ['F'], False, True, M), '', ilNone);
+    Chk('expr con funzione (STR)', BDEFindIndex(D, ['H'], [], [], False, True, M), '', ilNone);
+    Chk('expr discendente', BDEFindIndex(D, ['E'], [], [], True, True, M), '', ilNone);
+    // un indice semplice ilFull vince sull'espressione
+    Chk('expr: vince il semplice', BDEFindIndex(D, ['A', 'B'], [], [], False, True, M), 'IX_BA', ilFull);
+    if M.IsExpression then begin
+      Inc(nBad);
+      sBad := sBad + ' [expr: indice semplice con IsExpression True]';
+    end;
+    if Length(BDEExpressionFields(D[7])) <> 3 then begin
+      Inc(nBad);
+      sBad := sBad + ' [BDEExpressionFields(E+F+G): attesi 3 campi]';
+    end;
+    if Length(BDEExpressionFields(D[8])) <> 0 then begin
+      Inc(nBad);
+      sBad := sBad + ' [BDEExpressionFields(STR(H,5)+I): atteso nessun campo]';
+    end;
     // BDEIndexServesOrder: con C costante si salta C in testa all'indice (C,A,B)
     if not BDEIndexServesOrder(D[2], ['C'], ['A', 'B']) then begin
       Inc(nBad);
@@ -1442,7 +1481,7 @@ begin
   finally
     D.Free;
   end;
-  Write('(', 21, ' controlli) ');
+  Write('(', 34, ' controlli) ');
   if nBad > 0 then
     raise Exception.Create(IntToStr(nBad) + ' controlli falliti:' + sBad);
 end;

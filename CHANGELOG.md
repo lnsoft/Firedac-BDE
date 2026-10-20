@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- With `OnBDESetRange` assigned, a `WHERE` without `ORDER BY` is now served by the `TTable` also when the table only
+  has dBase expression indexes made of text fields joined by `+` (`ANNO+TIPODOC+NUMDOC`): the driver proposes the
+  index and always calls `OnBDESetRange`, so the program can build a partial key. A `WHERE` without `ORDER BY` also
+  reaches `OnBDESetRange` when `OnBDEIndexNeeded` is not assigned. New `BDEExpressionFields` and the
+  `AExpressions` form of `BDEFindIndex` (`TBDEIndexMatch.IsExpression`). See `docs/TABLECURSOR.md`.
 - Docs: `docs/BDE_4GB_BUG.md` explains the random "Insufficient disk space" error of the BDE (free space near a
   multiple of 4 GB). New `Demos/FixBDE4GbBug.pas`, a Unicode/Win32 port of the 2004 patch unit; with it the error
   disappeared in our tests. Optional, not part of the driver.

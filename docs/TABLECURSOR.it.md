@@ -147,6 +147,16 @@ Viene accettato anche un indice discendente o espressione con un `WHERE` (l'inte
 - I campi di testo si confrontano come sono memorizzati: `NUMDOC` è allineato a destra con spazi iniziali, quindi il
   valore deve essere `'                   245/12'`; il `TQuery` si comporta uguale (`NUMDOC = '245/12'` non trova niente).
 
+**Proposta ed evento.** Con `OnBDESetRange` assegnato, un `WHERE` senza `ORDER BY` sui primi campi di un indice
+espressione fatto solo di campi di **testo** uniti da `+` (`ANNO+TIPODOC+NUMDOC`) viene servito dalla `TTable`: il
+driver propone quell'indice (`Accept = True` in `OnBDEIndexNeeded`, che puoi cambiare o rifiutare) e chiama
+`OnBDESetRange` con tutte le condizioni, qualunque siano (testo, chiave parziale, intervalli): la chiave la
+costruisci tu. Senza `OnBDESetRange` non cambia nulla (`TQuery`). La proposta non c'è per le espressioni con
+funzioni (`STR(N,5)+X`, `UPPER(A)`), per campi numerici (`+` sarebbe una somma) né insieme a un `ORDER BY` (l'ordine
+di una chiave concatenata coincide con quello dei campi solo per i campi di testo: scegli tu l'indice in
+`OnBDEIndexNeeded`). `BDEExpressionFields(ADef)` e la forma con `AExpressions` di `BDEFindIndex` espongono la stessa
+logica.
+
 Un gestore per la sola chiave completa:
 
 ```pascal

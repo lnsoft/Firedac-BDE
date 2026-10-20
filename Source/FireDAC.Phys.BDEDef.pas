@@ -100,10 +100,18 @@ type
     Fields: TArray<String>;    // tutti i campi dell'indice
     KeyFields: Integer;        // primi campi usati da uguaglianze e intervallo (ilFull)
     Level: TBDEIndexLevel;
+    IsExpression: Boolean;     // indice espressione dBase fatto di soli campi (vedi BDEExpressionFields)
   end;
 
 // Campi di un indice (da TIndexDef.Fields, separati da ';')
 function BDEIndexFieldList(ADef: TIndexDef): TArray<String>;
+
+// Campi di un indice ESPRESSIONE dBase fatto solo di nomi di campo uniti da '+' (per esempio
+// ANNO+TIPODOC+NUMDOC, TIndexDef.Expression). Array vuoto se non e' un indice espressione o se
+// l'espressione contiene altro (funzioni, costanti, ripetizioni): il driver non sa costruirne la chiave.
+// Attenzione: l'espressione e' la concatenazione dei campi di TESTO a larghezza piena; se i campi
+// sono numerici '+' e' una somma. Chi usa il risultato deve controllare il tipo dei campi.
+function BDEExpressionFields(ADef: TIndexDef): TArray<String>;
 
 // True se l'indice (a campi, non espressione) restituisce le righe nell'ordine AOrderBy,
 // sapendo che i campi AEquals hanno un valore costante (WHERE campo = valore): i campi
@@ -119,6 +127,15 @@ function BDEIndexServesOrder(ADef: TIndexDef; const AEquals, AOrderBy: array of 
 // Preferisce il primo indice ilFull; altrimenti il primo ilCovers.
 function BDEFindIndex(AIndexDefs: TIndexDefs; const AEquals, ARanges, AOrderBy: array of String;
   ADescending: Boolean; out AMatch: TBDEIndexMatch): Boolean; overload;
+
+// Come sopra; con AExpressions True, se non c'e' un indice semplice ilFull e AOrderBy e' vuoto, si
+// considerano anche gli indici espressione scomponibili in campi (BDEExpressionFields) come se
+// fossero indici sui loro campi (AMatch.IsExpression True). Un indice espressione non ha un
+// SetRange standard (una chiave parziale non trova righe): chi lo usa deve impostare l'intervallo
+// da se' (OnBDESetRange). Per l'ORDER BY non si propongono: l'ordine di una chiave concatenata
+// e' quello dei campi solo per campi di testo.
+function BDEFindIndex(AIndexDefs: TIndexDefs; const AEquals, ARanges, AOrderBy: array of String;
+  ADescending, AExpressions: Boolean; out AMatch: TBDEIndexMatch): Boolean; overload;
 
 // Solo un elenco di campi: AAnyOrder True = l'indice ha come primi campi quelli dell'elenco in
 // qualunque ordine (tutte le permutazioni); False = nello stesso ordine dell'elenco.
@@ -335,6 +352,41 @@ begin
     Result[i] := Trim(Result[i]);
 end;
 
+function BDEExpressionFields(ADef: TIndexDef): TArray<String>;
+var
+  aP: TArray<String>;
+  i, k: Integer;
+  sF: String;
+begin
+  SetLength(Result, 0);
+  if not (ixExpression in ADef.Options) then
+    Exit;
+  sF := Trim(ADef.Expression);
+  if sF = '' then
+    Exit;
+  aP := sF.Split(['+']);
+  SetLength(Result, Length(aP));
+  for i := 0 to High(aP) do begin
+    sF := Trim(aP[i]);
+    if (sF = '') or CharInSet(sF[1], ['0'..'9']) or InList(sF, Copy(Result, 0, i)) then begin
+      SetLength(Result, 0);
+      Exit;
+    end;
+    for k := 1 to Length(sF) do
+      if not CharInSet(sF[k], ['A'..'Z', 'a'..'z', '0'..'9', '_']) then begin
+        SetLength(Result, 0);
+        Exit;
+      end;
+    Result[i] := sF;
+  end;
+end;
+
+function ExprIndex(ADef: TIndexDef; ADesc: Boolean): Boolean;
+begin
+  Result := (ixExpression in ADef.Options) and not (ixCaseInsensitive in ADef.Options) and
+    ((ixDescending in ADef.Options) = ADesc) and (Length(BDEExpressionFields(ADef)) > 0);
+end;
+
 function IndexNameOf(ADef: TIndexDef): String;
 begin
   if ADef.Name = '' then
@@ -453,6 +505,12 @@ end;
 
 function BDEFindIndex(AIndexDefs: TIndexDefs; const AEquals, ARanges, AOrderBy: array of String;
   ADescending: Boolean; out AMatch: TBDEIndexMatch): Boolean;
+begin
+  Result := BDEFindIndex(AIndexDefs, AEquals, ARanges, AOrderBy, ADescending, False, AMatch);
+end;
+
+function BDEFindIndex(AIndexDefs: TIndexDefs; const AEquals, ARanges, AOrderBy: array of String;
+  ADescending, AExpressions: Boolean; out AMatch: TBDEIndexMatch): Boolean;
 var
   aEq, aRng, aOrd, aAll, aF: TArray<String>;
   i, iKey: Integer;
@@ -489,6 +547,31 @@ begin
         AMatch.Level := ilCovers;
       end;
   end;
+  // indici espressione fatti di campi: solo per il WHERE (nessun ORDER BY) e solo se un indice
+  // semplice non e' gia' ilFull
+  if AExpressions and (Length(aOrd) = 0) and (AMatch.Level <> ilFull) then
+    for i := 0 to AIndexDefs.Count - 1 do begin
+      oDef := AIndexDefs[i];
+      if not ExprIndex(oDef, ADescending) then
+        Continue;
+      aF := BDEExpressionFields(oDef);
+      if FullMatch(aF, aEq, aRng, aOrd, iKey) then begin
+        AMatch := Default(TBDEIndexMatch);
+        AMatch.IndexName := IndexNameOf(oDef);
+        AMatch.Fields := aF;
+        AMatch.KeyFields := iKey;
+        AMatch.Level := ilFull;
+        AMatch.IsExpression := True;
+        Break;
+      end
+      else if (AMatch.Level = ilNone) and SetCovers(aF, aAll) then begin
+        AMatch.IndexName := IndexNameOf(oDef);
+        AMatch.Fields := aF;
+        AMatch.KeyFields := 0;
+        AMatch.Level := ilCovers;
+        AMatch.IsExpression := True;
+      end;
+    end;
   Result := AMatch.Level <> ilNone;
 end;
 
