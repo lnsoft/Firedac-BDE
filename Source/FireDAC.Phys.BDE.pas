@@ -1598,7 +1598,16 @@ begin
             end
             else if not SameText(sIdx, rName.FObject) then
               Continue;
-            oCols.DelimitedText := oID.Fields;
+            // indice espressione dBase (Fields vuoto): se e' fatto di soli campi uniti da '+'
+            // (ANNO+TIPODOC+NUMDOC) si riportano quei campi, altrimenti TFDTable.IndexName non
+            // trova nessun campo e risponde "Object [...] is not found"
+            if (ixExpression in oID.Options) and (Trim(oID.Fields) = '') then begin
+              oCols.Clear;
+              for sCol in BDEExpressionFields(oID) do
+                oCols.Add(sCol);
+            end
+            else
+              oCols.DelimitedText := oID.Fields;
             for j := 0 to oCols.Count - 1 do begin
               sCol := Trim(oCols[j]);
               if sCol = '' then
