@@ -115,6 +115,8 @@ FDQuery1.Post;
 - **Locks.** Waiting time on a locked record is governed by the BDE; use `LockRetry`.
   In the tests a row modified inside an open transaction stayed locked for other connections
   until commit/rollback, on both DBF and Paradox.
+- **"Insufficient disk space" at random.** A BDE bug (free space near a multiple of 4 GB), not a driver one.
+  Fix: put `Demos\FixBDE4GbBug.pas` first in the `uses` of your program. See [docs/BDE_4GB_BUG.md](docs/BDE_4GB_BUG.md).
 - **One BDE session per connection**; the BDE is not designed for heavy multi-threading.
 - Strings are exposed as Unicode; the conversion uses the table's language driver, so
   characters outside the table's code page may not survive a round trip.
@@ -162,7 +164,7 @@ A Paradox sample can be created with `Tools\MakeSampleParadox.dpr` (untested).
 ```
 Source/      driver units (BDEDef, BDEMeta, BDE) + design-time registration (BDEReg)
 Packages/    Delphi packages (d132 = Delphi 13.2)
-Demos/       BDETest console program + synthetic sample data
+Demos/       BDETest console program + synthetic sample data, FixBDE4GbBug unit
 Tools/       sample data generators
 docs/        architecture notes
 ```

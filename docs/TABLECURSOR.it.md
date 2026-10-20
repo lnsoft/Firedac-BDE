@@ -132,6 +132,47 @@ Con `OnBDESetRange` assegnato il driver non scarta più in preparazione un `WHER
 condizioni che il suo `SetRange` non sa esprimere; se non le gestisci, la query va al `TQuery` all'apertura.
 Viene accettato anche un indice discendente o espressione con un `WHERE` (l'intervallo è tuo).
 
+**Indici espressione dBase** (per esempio `ANNO+TIPODOC+NUMDOC`; `TIndexDef.Fields` è vuoto e il testo è in
+`Expression`), misurati su una tabella da 22.323 righe:
+
+- La `TTable` si apre su di essi e legge nell'ordine dell'indice.
+- Una chiave fatta da **tutti** i campi, assegnati uno a uno (`SetRangeStart; FieldByName('ANNO').AsString := ...;
+  ... ApplyRange`), trova la riga (1 riga, come il `TQuery`).
+- Una chiave **parziale** (solo `ANNO`, oppure `ANNO` e `TIPODOC`) **non trova nessuna riga e non dà errore**: il BDE
+  costruisce la chiave dall'intera espressione con i campi mancanti vuoti. Per questo il driver non usa mai il
+  proprio `SetRange` su un indice espressione: senza `OnBDESetRange` (o con `AHandled := False`) la query va al
+  `TQuery`.
+- `SetRange([...])`, `FindKey` e `FindNearest` con gli array sono rifiutati da Delphi
+  ("Cannot use array of Field values with Expression Indices").
+- I campi di testo si confrontano come sono memorizzati: `NUMDOC` è allineato a destra con spazi iniziali, quindi il
+  valore deve essere `'                   245/12'`; il `TQuery` si comporta uguale (`NUMDOC = '245/12'` non trova niente).
+
+Un gestore per la sola chiave completa:
+
+```pascal
+procedure TForm1.BDESetRange(Sender: TObject; ADataSet: TDataSet; const AIndexName: String;
+  const AConditions: TArray<TBDECondition>; var AHandled: Boolean);
+var
+  T: TTable;
+  C: TBDECondition;
+begin
+  if not SameText(AIndexName, 'NUMDOC') or (Length(AConditions) <> 3) then
+    Exit;                                   // non e' il nostro caso: comportamento standard (TQuery)
+  for C in AConditions do
+    if C.Op <> '=' then
+      Exit;
+  T := TTable(ADataSet);
+  T.SetRangeStart;
+  for C in AConditions do
+    T.FieldByName(C.Field).AsString := VarToStr(C.Value);
+  T.SetRangeEnd;
+  for C in AConditions do
+    T.FieldByName(C.Field).AsString := VarToStr(C.Value);
+  T.ApplyRange;
+  AHandled := True;
+end;
+```
+
 ### Cercare un indice nel proprio codice: `BDEFindIndex`
 
 La funzione che il driver usa per la sua proposta è pubblica (`FireDAC.Phys.BDEDef`), quindi la può chiamare anche un

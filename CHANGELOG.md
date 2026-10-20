@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Docs: `docs/BDE_4GB_BUG.md` explains the random "Insufficient disk space" error of the BDE (free space near a
+  multiple of 4 GB). New `Demos/FixBDE4GbBug.pas`, a Unicode/Win32 port of the 2004 patch unit; with it the error
+  disappeared in our tests. Optional, not part of the driver.
 - Fix: `FetchOptions.RecsMax` / `RecsSkip` (limit and paging) made FireDAC send `SELECT TOP n ...`, which Local SQL
   rejects ("Invalid use of keyword"). The limit is now applied by FireDAC on the client; with `TableCursor` the
   rows beyond the limit are not even read.
@@ -9,6 +12,9 @@
   index for equalities (any order of the fields), one range and the `ORDER BY`, or for a list of fields in any
   order. The driver uses them for its own proposal: `WHERE A = 1 AND B > 5` now picks the index on `(A, B)` even if
   one on `(B, A)` comes first, and `ORDER BY A, B WHERE C = 1` is served by an index on `(C, A, B)`.
+- dBase expression indexes (for example `ANNO+TIPODOC+NUMDOC`): the driver never applies its own `SetRange` to them,
+  because a partial key finds no rows without any error (measured). Use `OnBDESetRange` with the full key; see
+  `docs/TABLECURSOR.md`.
 - Faster `FetchOptions.RecsSkip` (paging): the driver skips the rows with the cursor only and tells FireDAC that
   nothing is left to skip, instead of FireDAC reading and converting every skipped row. 407,585 rows skipped:
   3,031 ms -> 243 ms (natural order), 4,339 ms -> 1,325 ms (`ORDER BY` on an index). Paging by key

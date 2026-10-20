@@ -22,6 +22,7 @@ program BDETest;
 {$APPTYPE CONSOLE}
 
 uses
+  FixBDE4GbBug,
   Winapi.Windows, System.SysUtils, System.Classes, System.Diagnostics, System.Variants,
   System.StrUtils, System.IOUtils,
   Data.DB, BDE, Bde.DBTables,
@@ -1446,6 +1447,274 @@ begin
     raise Exception.Create(IntToStr(nBad) + ' controlli falliti:' + sBad);
 end;
 
+// Misura (sola lettura): indici ESPRESSIONE dBase fatti di campi uniti da '+' (per esempio
+// ANNO+TIPODOC+NUMDOC) usati con una TTable. Per ogni indice scomponibile in campi prova,
+// con prefissi di 1..N campi presi da una riga campione:
+//  1) SetRange campo per campo (come fa il driver con gli indici a campi semplici)
+//  2) SetRange([chiave]) con la chiave concatenata (campi di testo riempiti a spazi)
+//  3) FindNearest([chiave])
+// e confronta le righe con un count(*) del TQuery con le stesse uguaglianze.
+procedure TestExprIndexProbe;
+const
+  C_MaxCount = 200000;
+var
+  T: TTable;
+  Q: TFDQuery;
+  i, j, n: Integer;
+  oDef: TIndexDef;
+  sExpr, sKey: String;
+  aParts, aVal, aSql, aKey: TArray<String>;
+  aKeyOk: TArray<Boolean>;
+  bDecomp, bAllStr: Boolean;
+  eT: TFieldType;
+  iSize, iRef, nExpr, nTot: Integer;
+
+  function OptText(AOpts: TIndexOptions): String;
+  begin
+    Result := '';
+    if ixPrimary in AOpts then Result := Result + ' primary';
+    if ixUnique in AOpts then Result := Result + ' unique';
+    if ixDescending in AOpts then Result := Result + ' desc';
+    if ixExpression in AOpts then Result := Result + ' expression';
+    if ixCaseInsensitive in AOpts then Result := Result + ' nocase';
+  end;
+
+  function IsTextType(AType: TFieldType): Boolean;
+  begin
+    Result := AType in [ftString, ftFixedChar, ftWideString, ftFixedWideChar];
+  end;
+
+  function IsNumType(AType: TFieldType): Boolean;
+  begin
+    Result := AType in [ftSmallint, ftInteger, ftWord, ftFloat, ftCurrency, ftBCD, ftAutoInc,
+      ftLargeint];
+  end;
+
+  // righe del TQuery con le uguaglianze sui primi AJ campi; -1 se non calcolabile
+  function RefCount(AJ: Integer): Integer;
+  var
+    m: Integer;
+    sW: String;
+  begin
+    Result := -1;
+    sW := '';
+    for m := 0 to AJ - 1 do begin
+      if aSql[m] = '' then
+        Exit;
+      if sW <> '' then
+        sW := sW + ' and ';
+      sW := sW + aParts[m] + ' = ' + aSql[m];
+    end;
+    try
+      Q.Close;
+      Q.Open('select count(*) from ' + SqlTab + ' where ' + sW);
+      Result := Q.Fields[0].AsInteger;
+      Q.Close;
+    except
+      Result := -1;
+    end;
+  end;
+
+  // AKind 0: nessun intervallo (solo apertura sull'indice e lettura); 1: SetRange campo per campo; 2: SetRange([chiave unica]); 3: FindNearest([chiave unica])
+  // Ogni tentativo usa una TTable nuova e dice in quale passaggio e' avvenuto un errore.
+  function Attempt(const AIndex: String; AKind, AJ, AExpected: Integer; ASwitch: Boolean): String;
+  var
+    Tx: TTable;
+    n2, m: Integer;
+    SW: TStopwatch;
+    bSame: Boolean;
+    sStage: String;
+  begin
+    sStage := 'creazione';
+    Tx := TTable.Create(nil);
+    try
+      try
+        Tx.DatabaseName := Folder;
+        Tx.TableName := TabName;
+        Tx.ReadOnly := True;
+        if ASwitch then begin
+          // prima si apre in ordine naturale, poi si passa all'indice a tabella aperta
+          sStage := 'Open';
+          Tx.Open;
+          sStage := 'IndexName (a tabella aperta)';
+          Tx.IndexName := AIndex;
+        end
+        else begin
+          sStage := 'IndexName (a tabella chiusa)';
+          Tx.IndexName := AIndex;
+          sStage := 'Open';
+          Tx.Open;
+        end;
+        sStage := 'intervallo';
+        SW := TStopwatch.StartNew;
+        case AKind of
+        0:
+          ;
+        1:
+          begin
+            Tx.SetRangeStart;
+            for m := 0 to AJ - 1 do
+              Tx.FieldByName(aParts[m]).AsString := aVal[m];
+            Tx.KeyFieldCount := AJ;
+            Tx.SetRangeEnd;
+            for m := 0 to AJ - 1 do
+              Tx.FieldByName(aParts[m]).AsString := aVal[m];
+            Tx.KeyFieldCount := AJ;
+            sStage := 'ApplyRange';
+            Tx.ApplyRange;
+          end;
+        2:
+          Tx.SetRange([aKey[AJ - 1]], [aKey[AJ - 1]]);
+        3:
+          begin
+            Tx.FindNearest([aKey[AJ - 1]]);
+            bSame := not Tx.Eof;
+            for m := 0 to AJ - 1 do
+              if bSame and not SameText(TrimRight(Tx.FieldByName(aParts[m]).AsString), aVal[m]) then
+                bSame := False;
+            Result := 'riga ' + IfThen(bSame, 'con il prefisso atteso', 'con prefisso DIVERSO') +
+              ' (' + IntToStr(SW.ElapsedMilliseconds) + ' ms)';
+            Exit;
+          end;
+        end;
+        sStage := 'lettura';
+        n2 := 0;
+        while (not Tx.Eof) and (n2 < C_MaxCount) do begin
+          Inc(n2);
+          Tx.Next;
+        end;
+        Result := IntToStr(n2) + ' righe in ' + IntToStr(SW.ElapsedMilliseconds) + ' ms';
+        if AExpected >= 0 then
+          Result := Result + IfThen(n2 = AExpected, ' = TQuery', ' DIVERSO dal TQuery (' +
+            IntToStr(AExpected) + ')');
+      except
+        on E: Exception do
+          Result := 'ERRORE in ' + sStage + ': ' + E.ClassName + ': ' + E.Message;
+      end;
+    finally
+      Tx.Free;
+    end;
+  end;
+
+  // ATTENZIONE: T.Open / T.Close ricostruiscono T.IndexDefs e liberano i TIndexDef esistenti,
+  // quindi ADef va letto tutto all'inizio (nome ed espressione copiati in variabili locali).
+  procedure ProbeOne(ADef: TIndexDef);
+  var
+    j2, m: Integer;
+    sR0, sR0b, sName: String;
+    bSw: Boolean;
+  begin
+    sName := ADef.Name;
+    sExpr := Trim(ADef.Expression);
+    if sExpr = '' then
+      sExpr := Trim(ADef.Fields);
+    aParts := sExpr.Split(['+']);
+    bDecomp := Length(aParts) > 0;
+    for m := 0 to High(aParts) do begin
+      aParts[m] := Trim(aParts[m]);
+      if T.FieldDefs.IndexOf(aParts[m]) < 0 then
+        bDecomp := False;
+    end;
+    Writeln('    indice ', sName, ' = ', sExpr);
+    if not bDecomp then begin
+      Writeln('        non scomponibile in campi uniti da +');
+      Exit;
+    end;
+    n := Length(aParts);
+    for m := 0 to n - 1 do
+      Writeln('        ', aParts[m], ': ', FieldTypeNames[T.FieldDefs[T.FieldDefs.IndexOf(aParts[m])].DataType],
+        ', larghezza ', T.FieldDefs[T.FieldDefs.IndexOf(aParts[m])].Size);
+    // riga campione: a meta' della tabella, in ordine naturale
+    T.Close;
+    T.IndexName := '';
+    T.Open;
+    T.MoveBy(T.RecordCount div 2);
+    SetLength(aVal, n);
+    SetLength(aSql, n);
+    SetLength(aKey, n);
+    SetLength(aKeyOk, n);
+    bAllStr := True;
+    sKey := '';
+    for m := 0 to n - 1 do begin
+      eT := T.FieldDefs[T.FieldDefs.IndexOf(aParts[m])].DataType;
+      iSize := T.FieldDefs[T.FieldDefs.IndexOf(aParts[m])].Size;
+      aVal[m] := TrimRight(T.FieldByName(aParts[m]).AsString);   // gli spazi iniziali contano
+      if IsTextType(eT) then begin
+        aSql[m] := '''' + StringReplace(aVal[m], '''', '''''', [rfReplaceAll]) + '''';
+        sKey := sKey + aVal[m];
+        if iSize > Length(aVal[m]) then
+          sKey := sKey + StringOfChar(' ', iSize - Length(aVal[m]));
+      end
+      else begin
+        bAllStr := False;
+        if IsNumType(eT) then
+          aSql[m] := FloatToStr(T.FieldByName(aParts[m]).AsFloat, TFormatSettings.Invariant)
+        else
+          aSql[m] := '';
+      end;
+      aKey[m] := sKey;
+      aKeyOk[m] := bAllStr;
+      Writeln('        riga campione ', aParts[m], ' = "', aVal[m], '" (', Length(aVal[m]), ' caratteri)');
+    end;
+    T.Close;
+    for j2 := 1 to n do begin
+      iRef := RefCount(j2);
+      Writeln('        prefisso di ', j2, ' campi: TQuery ', iRef, ' righe');
+      if j2 = 1 then begin
+        sR0 := Attempt(sName, 0, 0, -1, False);
+        Writeln('            0a) IndexName e poi Open    : ', sR0);
+        sR0b := Attempt(sName, 0, 0, -1, True);
+        Writeln('            0b) Open e poi IndexName    : ', sR0b);
+        bSw := Pos('ERRORE', sR0) = 1;
+        if bSw and (Pos('ERRORE', sR0b) = 1) then begin
+          Writeln('        l''indice non e'' utilizzabile con la TTable: salto i tentativi');
+          Exit;
+        end;
+      end;
+      Writeln('            1) SetRange campo per campo : ', Attempt(sName, 1, j2, iRef, bSw));
+      if aKeyOk[j2 - 1] then begin
+        Writeln('            2) SetRange([chiave unica]) : ', Attempt(sName, 2, j2, iRef, bSw));
+        Writeln('            3) FindNearest([chiave])    : ', Attempt(sName, 3, j2, iRef, bSw));
+      end
+      else
+        Writeln('            2) e 3) saltati: un campo non e'' di testo');
+    end;
+  end;
+
+begin
+  T := TTable.Create(nil);
+  Q := TFDQuery.Create(nil);
+  try
+    Q.Connection := Conn;
+    T.DatabaseName := Folder;
+    T.TableName := TabName;
+    T.ReadOnly := True;
+    T.FieldDefs.Update;
+    T.IndexDefs.Update;
+    Writeln;
+    nExpr := 0;
+    nTot := T.IndexDefs.Count;
+    for i := 0 to nTot - 1 do begin
+      oDef := T.IndexDefs[i];
+      Writeln('    ', IfThen(oDef.Name = '', '(primary)', oDef.Name), ': campi "', oDef.Fields,
+        '" espressione "', oDef.Expression, '"', OptText(oDef.Options));
+      if ixExpression in oDef.Options then
+        Inc(nExpr);
+    end;
+    if nExpr = 0 then
+      Write('(nessun indice espressione) ')
+    else
+      for j := 0 to nTot - 1 do begin
+        T.IndexDefs.Update;     // ProbeOne apre e chiude T: gli IndexDefs vanno riletti
+        if ixExpression in T.IndexDefs[j].Options then
+          ProbeOne(T.IndexDefs[j]);
+      end;
+  finally
+    Q.Free;
+    T.Free;
+  end;
+end;
+
 // Misura (non verifica il driver): costo di FetchOptions.RecsSkip con TableCursor e,
 // su una TTable pura, confronto tra Next ripetuto, MoveBy e RecNo per saltare N righe.
 // Serve a decidere se il driver deve gestire lo skip da solo (MoveBy) invece di far
@@ -2254,6 +2523,7 @@ begin
         Run('Misura: TTable.Filter contro WHERE del TQuery', TestFilterProbe);
       Run('Diagnostica: RecsMax (limite di righe) con il driver', TestRecsMax);
       Run('Misura: RecsSkip con TableCursor, Next contro MoveBy contro RecNo', TestSkipProbe);
+      Run('Misura: indici espressione (campi uniti da +) con SetRange / FindNearest', TestExprIndexProbe);
       if KeyField <> '' then
         Run('Misura ORDER BY: TQuery contro TTable con indice', TestOrderBy);
       if KeyField <> '' then

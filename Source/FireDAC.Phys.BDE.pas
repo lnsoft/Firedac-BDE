@@ -849,6 +849,12 @@ begin
       try
         // WHERE: su campi numerici dei campi chiave dell'indice:
         // uguaglianze sui primi campi, poi al piu' un intervallo sul campo successivo
+        // Indice espressione (dBase, per esempio ANNO+TIPODOC+NUMDOC): il BDE costruisce la chiave
+        // dall'intera espressione, quindi una chiave parziale non trova nessuna riga e non da'
+        // errore (misurato: 0 righe invece di 1317). Il SetRange standard non si usa: servono
+        // OnBDESetRange oppure il TQuery.
+        if (oDef <> nil) and (ixExpression in oDef.Options) then
+          raise Exception.Create('indice espressione: SetRange standard non applicabile');
         if Length(aSeq) = 0 then
           raise Exception.Create('nessun campo chiave per il WHERE');
         for i := 0 to High(aConds) do begin
