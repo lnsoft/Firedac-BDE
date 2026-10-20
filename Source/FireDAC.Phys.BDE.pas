@@ -267,15 +267,6 @@ begin
 end;
 
 // --- scelta dell'indice per il percorso TTable ---------------------------------
-function IndexFieldList(ADef: TIndexDef): TArray<String>;
-var
-  i: Integer;
-begin
-  Result := ADef.Fields.Split([';']);
-  for i := 0 to High(Result) do
-    Result[i] := Trim(Result[i]);
-end;
-
 // I primi campi dell'indice sono AFields (nello stesso ordine; con ASet: gli stessi, in
 // qualunque ordine)
 function IndexLeads(ADef: TIndexDef; const AFields: TArray<String>; ASet: Boolean): Boolean;
@@ -285,7 +276,7 @@ var
   bHit: Boolean;
 begin
   Result := False;
-  aF := IndexFieldList(ADef);
+  aF := BDEIndexFieldList(ADef);
   if Length(aF) < Length(AFields) then
     Exit;
   for i := 0 to High(AFields) do
@@ -302,15 +293,6 @@ begin
     else if not SameText(aF[i], AFields[i]) then
       Exit;
   Result := True;
-end;
-
-// Indice "semplice": campi (niente espressioni, niente maiuscole/minuscole indifferenti)
-// con il verso richiesto
-function IndexMatches(ADef: TIndexDef; const AFields: TArray<String>;
-  ADesc, ASet: Boolean): Boolean;
-begin
-  Result := (ADef.Options * [ixExpression, ixCaseInsensitive] = []) and
-    ((ixDescending in ADef.Options) = ADesc) and IndexLeads(ADef, AFields, ASet);
 end;
 
 function IsNumericFieldType(AType: TFieldType): Boolean;
@@ -714,8 +696,9 @@ end;
 function TFDPhysBDECommand.TryPrepareTable: Boolean;
 var
   sTab, sIdx: String;
-  aCols, aOrder, aF: TArray<String>;
+  aCols, aOrder, aF, aEqN, aRngN, aSeq: TArray<String>;
   aConds: TArray<TBDERangeCond>;
+  oMatch: TBDEIndexMatch;
   aEqIdx: TArray<Integer>;
   aKey: TArray<String>;
   oTab: TTable;
@@ -747,6 +730,7 @@ begin
       bHook := Assigned(BDEConnection.FOnIndexNeeded);
       bRangeHook := Assigned(BDEConnection.FOnSetRange);
       bSet := False;
+      SetLength(aSeq, 0);
       aKey := aOrder;
       if (Length(aOrder) = 0) and (Length(aConds) > 0) then begin
         if not bHook then
@@ -778,13 +762,23 @@ begin
           if (k >= 0) and not IsNumericFieldType(oTab.FieldDefs[k].DataType) then
             bNonNum := True;
         end;
-        // proposta del driver: primo indice semplice sui campi richiesti, nello stesso verso
-        oDef := nil;
-        for i := 0 to oTab.IndexDefs.Count - 1 do
-          if IndexMatches(oTab.IndexDefs[i], aKey, bDesc, bSet) then begin
-            oDef := oTab.IndexDefs[i];
-            Break;
+        // proposta del driver (BDEFindIndex): uguaglianze del WHERE sui primi campi dell'indice
+        // in qualunque ordine, poi l'eventuale intervallo, poi l'ORDER BY; altrimenti il primo
+        // indice che rispetta l'ORDER BY (o copre i campi del WHERE)
+        SetLength(aEqN, 0);
+        SetLength(aRngN, 0);
+        for i := 0 to High(aConds) do
+          if aConds[i].Op = '=' then begin
+            SetLength(aEqN, Length(aEqN) + 1);
+            aEqN[High(aEqN)] := aConds[i].Field;
+          end
+          else begin
+            SetLength(aRngN, Length(aRngN) + 1);
+            aRngN[High(aRngN)] := aConds[i].Field;
           end;
+        oDef := nil;
+        if BDEFindIndex(oTab.IndexDefs, aEqN, aRngN, aOrder, bDesc, oMatch) then
+          oDef := FindIndexByName(oTab, oMatch.IndexName);
         if bHook then begin
           // il programma puo' cambiare l'indice o rifiutare; senza proposta (anche per i campi
           // non numerici) l'accettazione parte da False: il comportamento standard
@@ -811,7 +805,11 @@ begin
             // responsabilita' del programma)
             if (ixDescending in oDef.Options) <> bDesc then
               raise Exception.Create('verso dell''indice diverso dall''ORDER BY');
-            if not IndexLeads(oDef, aKey, bSet) then
+            if bSet then
+              bOk := IndexLeads(oDef, aKey, True)
+            else
+              bOk := BDEIndexServesOrder(oDef, aEqN, aKey);
+            if not bOk then
               raise Exception.Create('l''indice non corrisponde ai campi');
           end
           else if ((Length(aConds) > 0) or bSet) and not bRangeHook then
@@ -822,16 +820,23 @@ begin
         end
         else if oDef = nil then
           raise Exception.Create('nessun indice per l''ORDER BY');
-        if bSet then begin
-          // WHERE senza ORDER BY: i campi dell'indice scelto diventano l'ordinamento
-          SetLength(aOrder, Length(aKey));
-          if ixExpression in oDef.Options then
-            aOrder := Copy(aKey)
-          else begin
-            aF := IndexFieldList(oDef);
-            for i := 0 to High(aKey) do
-              aOrder[i] := aF[i];
+        // campi chiave per il SetRange: i primi campi dell'indice che compaiono nel WHERE
+        // (uguaglianze, poi l'intervallo); per un indice-espressione quelli richiesti
+        if ixExpression in oDef.Options then
+          aSeq := Copy(aKey)
+        else begin
+          aF := BDEIndexFieldList(oDef);
+          k := 0;
+          while k < Length(aF) do begin
+            bOk := False;
+            for i := 0 to High(aConds) do
+              if SameText(aConds[i].Field, aF[k]) then
+                bOk := True;
+            if not bOk then
+              Break;
+            Inc(k);
           end;
+          aSeq := Copy(aF, 0, k);
         end;
         FIndexName := IndexEventName(oDef);
         oTab.IndexName := oDef.Name;
@@ -842,25 +847,25 @@ begin
       bStd := True;
       if Length(aConds) > 0 then
       try
-        // WHERE: ammesso solo con ORDER BY, su campi numerici dell'ORDER BY:
+        // WHERE: su campi numerici dei campi chiave dell'indice:
         // uguaglianze sui primi campi, poi al piu' un intervallo sul campo successivo
-        if Length(aOrder) = 0 then
-          raise Exception.Create('WHERE senza ORDER BY');
+        if Length(aSeq) = 0 then
+          raise Exception.Create('nessun campo chiave per il WHERE');
         for i := 0 to High(aConds) do begin
           p := -1;
-          for k := 0 to High(aOrder) do
-            if SameText(aConds[i].Field, aOrder[k]) then begin
+          for k := 0 to High(aSeq) do
+            if SameText(aConds[i].Field, aSeq[k]) then begin
               p := k;
               Break;
             end;
           if p < 0 then
-            raise Exception.Create('campo del WHERE fuori dall''ORDER BY');
+            raise Exception.Create('campo del WHERE fuori dai campi chiave');
           aConds[i].Pos := p;
-          if not IsNumericFieldType(oTab.FieldDefs[oTab.FieldDefs.IndexOf(aOrder[p])].DataType) then
+          if not IsNumericFieldType(oTab.FieldDefs[oTab.FieldDefs.IndexOf(aSeq[p])].DataType) then
             raise Exception.Create('campo non numerico nel WHERE');
         end;
         SetLength(aEqIdx, 0);
-        while iEq < Length(aOrder) do begin
+        while iEq < Length(aSeq) do begin
           nEq := 0;
           nOth := 0;
           p := -1;
@@ -881,7 +886,7 @@ begin
             Break;
         end;
         nOth := Length(aEqIdx);
-        if iEq < Length(aOrder) then
+        if iEq < Length(aSeq) then
           for i := 0 to High(aConds) do
             if aConds[i].Pos = iEq then begin
               if (aConds[i].Op = '>=') or (aConds[i].Op = '>') then begin
@@ -926,7 +931,7 @@ begin
     FData := oTab;
     FColNames := aCols;
     FConds := aConds;
-    FOrderFields := aOrder;
+    FOrderFields := aSeq;
     FEqIdx := aEqIdx;
     FLoIdx := iLo;
     FHiIdx := iHi;

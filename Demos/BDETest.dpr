@@ -1360,6 +1360,92 @@ begin
   end;
 end;
 
+// BDEFindIndex / BDEIndexServesOrder su indici costruiti a mano (non usa la tabella):
+// uguaglianze in qualunque ordine, intervallo dopo le uguaglianze, ORDER BY con uguaglianze
+// in testa, permutazioni di un elenco di campi, indici scartati (espressione, maiuscole
+// indifferenti, verso diverso).
+procedure TestFindIndex;
+var
+  D: TIndexDefs;
+  M: TBDEIndexMatch;
+  nBad: Integer;
+  sBad: String;
+
+  procedure Chk(const ALabel: String; AFound: Boolean; const AExp: String;
+    ALevel: TBDEIndexLevel);
+  begin
+    if (AExp = '') and not AFound then
+      Exit;
+    if AFound and (AExp <> '') and (M.IndexName = AExp) and (M.Level = ALevel) then
+      Exit;
+    Inc(nBad);
+    sBad := sBad + ' [' + ALabel + ': atteso "' + AExp + '", ' +
+      IfThen(AFound, 'trovato "' + M.IndexName + '" livello ' + IntToStr(Ord(M.Level)), 'nessuno') + ']';
+  end;
+
+begin
+  nBad := 0;
+  sBad := '';
+  D := TIndexDefs.Create(nil);
+  try
+    D.Add('IX_BA', 'B;A', []);
+    D.Add('IX_AB', 'A;B', []);
+    D.Add('IX_CAB', 'C;A;B', []);
+    D.Add('IX_DESC', 'A;B', [ixDescending]);
+    D.Add('IX_EXPR', 'UPPER(A)', [ixExpression]);
+    D.Add('IX_CI', 'D', [ixCaseInsensitive]);
+    D.Add('IX_D', 'D', []);
+
+    // A=1 AND B>5: serve (A,B); (B,A) viene prima ma non va bene per il SetRange
+    Chk('A=, B>', BDEFindIndex(D, ['A'], ['B'], [], False, M), 'IX_AB', ilFull);
+    // A=1 AND B=2: l'ordine dei campi non conta, vale il primo indice
+    Chk('A=, B=', BDEFindIndex(D, ['A', 'B'], [], [], False, M), 'IX_BA', ilFull);
+    Chk('B=, A=', BDEFindIndex(D, ['B', 'A'], [], [], False, M), 'IX_BA', ilFull);
+    // ORDER BY A, B
+    Chk('order A,B', BDEFindIndex(D, [], [], ['A', 'B'], False, M), 'IX_AB', ilFull);
+    // ORDER BY A, B WHERE C = 1: uguaglianza su un campo fuori dall'ORDER BY, in testa
+    Chk('order A,B, C=', BDEFindIndex(D, ['C'], [], ['A', 'B'], False, M), 'IX_CAB', ilFull);
+    // ORDER BY A WHERE B > 5: l'ordinamento e' servito da (A,B), ma non l'intervallo
+    Chk('order A, B>', BDEFindIndex(D, [], ['B'], ['A'], False, M), 'IX_AB', ilCovers);
+    // ORDER BY A, B WHERE A = 1 (campo uguale e anche nell'ORDER BY)
+    Chk('order A,B, A=', BDEFindIndex(D, ['A'], [], ['A', 'B'], False, M), 'IX_AB', ilFull);
+    // verso discendente: solo l'indice discendente
+    Chk('desc A=', BDEFindIndex(D, ['A'], [], [], True, M), 'IX_DESC', ilFull);
+    // indici espressione e maiuscole indifferenti scartati; D e' sull'indice normale
+    Chk('D=', BDEFindIndex(D, ['D'], [], [], False, M), 'IX_D', ilFull);
+    Chk('espressione', BDEFindIndex(D, ['UPPER(A)'], [], [], False, M), '', ilNone);
+    // A = 1 AND A > 0, oppure due campi con intervallo: niente ilFull
+    Chk('A= e A>', BDEFindIndex(D, ['A'], ['A'], [], False, M), 'IX_AB', ilCovers);
+    Chk('due intervalli', BDEFindIndex(D, [], ['A', 'B'], [], False, M), 'IX_BA', ilCovers);
+    // richiesta vuota
+    Chk('vuota', BDEFindIndex(D, [], [], [], False, M), '', ilNone);
+    // solo un elenco di campi: tutte le permutazioni, oppure nello stesso ordine
+    Chk('elenco B,A qualunque', BDEFindIndex(D, ['B', 'A'], False, True, M), 'IX_BA', ilFull);
+    Chk('elenco A,B qualunque', BDEFindIndex(D, ['A', 'B'], False, True, M), 'IX_BA', ilFull);
+    Chk('elenco A,B ordinato', BDEFindIndex(D, ['A', 'B'], False, False, M), 'IX_AB', ilFull);
+    Chk('elenco B,A ordinato', BDEFindIndex(D, ['B', 'A'], False, False, M), 'IX_BA', ilFull);
+    Chk('elenco C,B qualunque', BDEFindIndex(D, ['C', 'B'], False, True, M), '', ilNone);
+    // BDEIndexServesOrder: con C costante si salta C in testa all'indice (C,A,B)
+    if not BDEIndexServesOrder(D[2], ['C'], ['A', 'B']) then begin
+      Inc(nBad);
+      sBad := sBad + ' [serves C=, order A,B: atteso True]';
+    end;
+    if BDEIndexServesOrder(D[2], ['C'], ['B']) then begin
+      Inc(nBad);
+      sBad := sBad + ' [serves C=, order B: atteso False]';
+    end;
+    if BDEIndexServesOrder(D[4], [], ['A']) then begin
+      Inc(nBad);
+      sBad := sBad + ' [serves indice espressione: atteso False]';
+    end;
+  finally
+    D.Free;
+  end;
+  Write('(', 21, ' controlli) ');
+  if nBad > 0 then
+    raise Exception.Create(IntToStr(nBad) + ' controlli falliti:' + sBad);
+end;
+
 // Misura (non verifica il driver): costo di FetchOptions.RecsSkip con TableCursor e,
 // su una TTable pura, confronto tra Next ripetuto, MoveBy e RecNo per saltare N righe.
 // Serve a decidere se il driver deve gestire lo skip da solo (MoveBy) invece di far
@@ -2157,6 +2243,7 @@ begin
       Run('Funzioni escape Local SQL', TestEscapes);
       Run('Parametro TableCursor (select semplici con TTable)', TestTableCursor);
       Run('Costo di lettura: BDE grezzo contro FireDAC', TestFetchCost);
+      Run('Ricerca dell''indice: BDEFindIndex (indici sintetici)', TestFindIndex);
       if KeyField <> '' then
         Run('Evento OnBDEIndexNeeded (scelta dell''indice)', TestIndexNeeded);
       if KeyField <> '' then

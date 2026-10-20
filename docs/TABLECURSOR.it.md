@@ -16,8 +16,8 @@ FDConnection1.Params.Values['TableCursor'] := 'True';
 |--------------------------------------------------------------------------|---------|
 | `select * from "TAB.DBF"` (anche `SELECT A.* FROM "TAB.DBF" A`, cioè ciò che manda `TFDTable.Open`) | TTable |
 | `select c1, c2 from "TAB.DBF"` (campi semplici, senza virgolette)        | TTable |
-| `... order by c1[, c2]` crescente, se esiste un indice che inizia esattamente con quei campi (campi semplici; non espressione, non discendente, non insensibile alle maiuscole) | TTable su quell'indice |
-| `... where c1 = :a [and c2 >= :b ...] order by c1, c2` – uguaglianze sui primi campi e al massimo un intervallo (`>`, `>=`, `<`, `<=`) sul successivo, solo campi numerici, valore come parametro o numero | TTable + `SetRange` |
+| `... order by c1[, c2]` crescente, se esiste un indice che serve quell'ordine: i suoi primi campi sono quei campi, dopo gli eventuali campi in testa che il `WHERE` fissa con `=` (campi semplici; non espressione, non discendente, non insensibile alle maiuscole) | TTable su quell'indice |
+| `... where c1 = :a [and c2 >= :b ...] order by ...` – uguaglianze sui primi campi di un indice (in qualunque ordine), al massimo un intervallo (`>`, `>=`, `<`, `<=`) sul campo successivo, poi i campi dell'`ORDER BY`; solo campi numerici, valore come parametro o numero | TTable + `SetRange` |
 | tutto il resto: `desc`, `WHERE` senza `ORDER BY`, campi testo/data nel `WHERE`, join, funzioni, nomi di campo tra virgolette, parametri NULL o non numerici | TQuery (invariato) |
 
 ## Misure
@@ -112,8 +112,8 @@ va al `TQuery` come sempre. Per prenderla in carico imposta l'indice **e** `AAcc
 - **`WHERE` senza `ORDER BY`**: con l'indice che indichi, le condizioni sono servite con un `SetRange`. Le righe
   tornano nell'ordine dell'indice.
 - **Un indice diverso da quello proposto**, anche espressione o insensibile alle maiuscole. Per un indice a campi
-  semplici il driver controlla che i primi campi siano quelli richiesti e che il verso coincida; per un indice
-  espressione (`ixExpression`) il controllo è tuo.
+  semplici il driver controlla che l'indice serva l'`ORDER BY` (o abbia in testa i campi del `WHERE`, in qualunque
+  ordine) e che il verso coincida; per un indice espressione (`ixExpression`) il controllo è tuo.
 
 ### `OnBDESetRange`
 
@@ -131,6 +131,44 @@ nella SQL).
 Con `OnBDESetRange` assegnato il driver non scarta più in preparazione un `WHERE` su campi testo o data, né le
 condizioni che il suo `SetRange` non sa esprimere; se non le gestisci, la query va al `TQuery` all'apertura.
 Viene accettato anche un indice discendente o espressione con un `WHERE` (l'intervallo è tuo).
+
+### Cercare un indice nel proprio codice: `BDEFindIndex`
+
+La funzione che il driver usa per la sua proposta è pubblica (`FireDAC.Phys.BDEDef`), quindi la può chiamare anche un
+gestore. Lavora su un `TIndexDefs` (per esempio `TTable.IndexDefs` dopo `Update`) e considera solo gli indici a campi
+semplici del verso richiesto (non espressione, non insensibili alle maiuscole).
+
+```pascal
+function BDEFindIndex(AIndexDefs: TIndexDefs; const AEquals, ARanges, AOrderBy: array of String;
+  ADescending: Boolean; out AMatch: TBDEIndexMatch): Boolean; overload;
+function BDEFindIndex(AIndexDefs: TIndexDefs; const AFields: array of String;
+  ADescending, AAnyOrder: Boolean; out AMatch: TBDEIndexMatch): Boolean; overload;
+function BDEIndexServesOrder(ADef: TIndexDef; const AEquals, AOrderBy: array of String): Boolean;
+```
+
+- **Forma completa** (`AEquals`, `ARanges`, `AOrderBy`): i campi con `=` possono stare in qualunque ordine, quindi
+  `where A = 1 and B = 2` trova sia un indice su `(B, A)` sia uno su `(A, B)`. È come provare tutte le permutazioni
+  dei campi del `WHERE`, senza generarle: per ogni indice si controllano una volta i suoi primi campi. Un campo con
+  intervallo (`>`, `<`...) deve venire subito dopo le uguaglianze, e dopo ancora i campi dell'`ORDER BY`. L'ordine
+  dell'`ORDER BY` conta, ma un campo fissato da `=` si può saltare: `where C = 1 order by A, B` usa un indice su
+  `(C, A, B)`.
+- **`AMatch.Level`**: `ilFull` = l'indice serve tutto, quindi si può usare il `SetRange` del driver; `ilCovers` =
+  rispetta l'`ORDER BY` (o ha in testa i campi del `WHERE`) ma le condizioni richiedono il tuo `OnBDESetRange`;
+  `ilNone` = niente. Vince il primo indice `ilFull`, altrimenti il primo `ilCovers`.
+- **Forma a elenco** (`AFields`): `AAnyOrder = True` trova un indice che ha come primi campi quelli dell'elenco in
+  qualunque ordine, `False` nello stesso ordine. Comoda con `AFieldNames.Split([';'])` dentro `OnBDEIndexNeeded`.
+
+```pascal
+// campi testo nel WHERE: il driver non ha proposta, cerco un indice su di essi (qualunque ordine)
+if BDEFindIndex(FOrders.IndexDefs, AFieldNames.Split([';']), ADescending, True, oMatch) then begin
+  AIndexName := oMatch.IndexName;
+  AAccept := True;                 // le condizioni sul testo richiedono anche OnBDESetRange
+end;
+```
+
+Nota: nelle tabelle dBase un indice su più campi è normalmente un indice espressione (`ixExpression`), che il driver
+e `BDEFindIndex` lasciano a te; gli indici semplici su più campi sono tipici di Paradox. Guarda `IndexDefs` della
+tua tabella per capire quale caso hai.
 
 ### Note
 

@@ -15,8 +15,8 @@ FDConnection1.Params.Values['TableCursor'] := 'True';
 |--------------------------------------------------------------------------|--------|
 | `select * from "TAB.DBF"` (also `SELECT A.* FROM "TAB.DBF" A`, which is what `TFDTable.Open` sends) | TTable |
 | `select f1, f2 from "TAB.DBF"` (plain, unquoted field names)             | TTable |
-| `... order by f1[, f2]` ascending, when an index starts with exactly those fields (plain fields; not an expression, not descending, not case-insensitive) | TTable on that index |
-| `... where f1 = :a [and f2 >= :b ...] order by f1, f2` – equalities on the first fields and at most one range (`>`, `>=`, `<`, `<=`) on the next, numeric fields only, value as a parameter or a number | TTable + `SetRange` |
+| `... order by f1[, f2]` ascending, when an index serves that order: its first fields are those fields, after any leading fields that the `WHERE` fixes with `=` (plain fields; not an expression, not descending, not case-insensitive) | TTable on that index |
+| `... where f1 = :a [and f2 >= :b ...] order by ...` – equalities on the first fields of an index (in any order), at most one range (`>`, `>=`, `<`, `<=`) on the next field, then the `ORDER BY` fields; numeric fields only, value as a parameter or a number | TTable + `SetRange` |
 | anything else: `desc`, `WHERE` without `ORDER BY`, text/date fields in the `WHERE`, joins, functions, quoted field names, NULL or non-numeric parameters | TQuery (unchanged) |
 
 ## Measurements
@@ -111,8 +111,8 @@ the query runs as usual with the `TQuery`. To take it over, set the index **and*
 - **`WHERE` without `ORDER BY`**: with the index you return, the conditions are served with a `SetRange`. The rows
   come back in index order.
 - **Another index than the proposed one**, including expression and case-insensitive indexes. For an index made of
-  plain fields the driver checks that its first fields are the requested ones and that the direction matches; for an
-  expression index (`ixExpression`) the check is yours.
+  plain fields the driver checks that the index serves the `ORDER BY` (or has the `WHERE` fields in front, in any
+  order) and that the direction matches; for an expression index (`ixExpression`) the check is yours.
 
 ### `OnBDESetRange`
 
@@ -129,6 +129,43 @@ before the driver sets its own range. `AConditions` has one entry per condition 
 With `OnBDESetRange` assigned the driver no longer rejects at prepare time a `WHERE` on text or date fields, or
 conditions that its own `SetRange` cannot express; if you do not handle them, the query goes to the `TQuery` when
 it is opened. A descending or expression index is also accepted with a `WHERE` (the range is yours).
+
+### Finding an index in your own code: `BDEFindIndex`
+
+The function the driver uses for its proposal is public (`FireDAC.Phys.BDEDef`), so a handler can call it too. It
+works on a `TIndexDefs` (for example `TTable.IndexDefs` after `Update`) and considers only plain-field indexes of the
+requested direction (no expression, not case-insensitive).
+
+```pascal
+function BDEFindIndex(AIndexDefs: TIndexDefs; const AEquals, ARanges, AOrderBy: array of String;
+  ADescending: Boolean; out AMatch: TBDEIndexMatch): Boolean; overload;
+function BDEFindIndex(AIndexDefs: TIndexDefs; const AFields: array of String;
+  ADescending, AAnyOrder: Boolean; out AMatch: TBDEIndexMatch): Boolean; overload;
+function BDEIndexServesOrder(ADef: TIndexDef; const AEquals, AOrderBy: array of String): Boolean;
+```
+
+- **Full form** (`AEquals`, `ARanges`, `AOrderBy`): the fields with `=` may be in any order, so `where A = 1 and B = 2`
+  finds an index on `(B, A)` as well as `(A, B)`. This is the same as trying every permutation of the `WHERE` fields,
+  without generating them: for each index its first fields are checked once. A field with a range (`>`, `<`...) must
+  come right after the equalities, and the `ORDER BY` fields after that. The `ORDER BY` order matters, but a field fixed
+  by `=` can be skipped: `where C = 1 order by A, B` uses an index on `(C, A, B)`.
+- **`AMatch.Level`**: `ilFull` = the index serves everything, so the driver's `SetRange` can be used; `ilCovers` = it
+  respects the `ORDER BY` (or has the `WHERE` fields in front) but the conditions need your `OnBDESetRange`; `ilNone`
+  = nothing. The first `ilFull` index wins, otherwise the first `ilCovers`.
+- **List form** (`AFields`): `AAnyOrder = True` finds an index whose first fields are those fields in any order,
+  `False` in the same order. Handy with `AFieldNames.Split([';'])` inside `OnBDEIndexNeeded`.
+
+```pascal
+// text fields in the WHERE: the driver has no proposal, look for an index on them (any order)
+if BDEFindIndex(FOrders.IndexDefs, AFieldNames.Split([';']), ADescending, True, oMatch) then begin
+  AIndexName := oMatch.IndexName;
+  AAccept := True;                 // the conditions on text need OnBDESetRange as well
+end;
+```
+
+Note: in dBase tables an index on more than one field is normally an expression index (`ixExpression`), which the
+driver and `BDEFindIndex` leave to you; plain multi-field indexes are typical of Paradox. Look at `IndexDefs` of your
+table to see which case you have.
 
 ### Notes
 

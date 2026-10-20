@@ -5,6 +5,10 @@
 - Fix: `FetchOptions.RecsMax` / `RecsSkip` (limit and paging) made FireDAC send `SELECT TOP n ...`, which Local SQL
   rejects ("Invalid use of keyword"). The limit is now applied by FireDAC on the client; with `TableCursor` the
   rows beyond the limit are not even read.
+- New public functions `BDEFindIndex` (two forms) and `BDEIndexServesOrder` in `FireDAC.Phys.BDEDef`: they find the
+  index for equalities (any order of the fields), one range and the `ORDER BY`, or for a list of fields in any
+  order. The driver uses them for its own proposal: `WHERE A = 1 AND B > 5` now picks the index on `(A, B)` even if
+  one on `(B, A)` comes first, and `ORDER BY A, B WHERE C = 1` is served by an index on `(C, A, B)`.
 - Faster `FetchOptions.RecsSkip` (paging): the driver skips the rows with the cursor only and tells FireDAC that
   nothing is left to skip, instead of FireDAC reading and converting every skipped row. 407,585 rows skipped:
   3,031 ms -> 243 ms (natural order), 4,339 ms -> 1,325 ms (`ORDER BY` on an index). Paging by key
