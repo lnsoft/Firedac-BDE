@@ -142,6 +142,9 @@ Viene accettato anche un indice discendente o espressione con un `WHERE` (l'inte
   costruisce la chiave dall'intera espressione con i campi mancanti vuoti. Per questo il driver non usa mai il
   proprio `SetRange` su un indice espressione: senza `OnBDESetRange` (o con `AHandled := False`) la query va al
   `TQuery`.
+- Una chiave parziale **funziona se la completi tu**: all'inizio dell'intervallo i campi mancanti vuoti, alla fine
+  riempiti con `#255` per tutta la loro larghezza (misurato con `DocT00`: 1317 e 449 righe, uguali al `TQuery`).
+  Vedi il gestore qui sotto.
 - `SetRange([...])`, `FindKey` e `FindNearest` con gli array sono rifiutati da Delphi
   ("Cannot use array of Field values with Expression Indices").
 - I campi di testo si confrontano come sono memorizzati: `NUMDOC` è allineato a destra con spazi iniziali, quindi il
@@ -157,31 +160,69 @@ di una chiave concatenata coincide con quello dei campi solo per i campi di test
 `OnBDEIndexNeeded`). `BDEExpressionFields(ADef)` e la forma con `AExpressions` di `BDEFindIndex` espongono la stessa
 logica.
 
-Un gestore per la sola chiave completa:
+Un gestore che accetta uguaglianze sui primi campi dell'indice, chiavi parziali comprese (il driver passa il nome
+dell'indice e le condizioni; `BDEExpressionFields` restituisce i campi dell'espressione):
 
 ```pascal
 procedure TForm1.BDESetRange(Sender: TObject; ADataSet: TDataSet; const AIndexName: String;
   const AConditions: TArray<TBDECondition>; var AHandled: Boolean);
 var
   T: TTable;
-  C: TBDECondition;
+  aF: TArray<String>;
+  sV: String;
+  i: Integer;
+
+  function CondValue(const AField: String; out AValue: String): Boolean;
+  var
+    j: Integer;
+  begin
+    Result := False;
+    for j := 0 to High(AConditions) do
+      if SameText(AConditions[j].Field, AField) then begin
+        AValue := VarToStr(AConditions[j].Value);
+        Exit(True);
+      end;
+  end;
+
+  // la chiave: i campi con '=' al loro valore; gli altri vuoti (inizio) o #255 (fine)
+  procedure Fill(AHigh: Boolean);
+  var
+    j: Integer;
+    F: TField;
+  begin
+    for j := 0 to High(aF) do begin
+      F := T.FieldByName(aF[j]);
+      if CondValue(aF[j], sV) then
+        F.AsString := sV
+      else if AHigh then
+        F.AsString := StringOfChar(#255, F.Size);
+    end;
+    T.KeyFieldCount := Length(aF);
+  end;
+
 begin
-  if not SameText(AIndexName, 'NUMDOC') or (Length(AConditions) <> 3) then
-    Exit;                                   // non e' il nostro caso: comportamento standard (TQuery)
-  for C in AConditions do
-    if C.Op <> '=' then
-      Exit;
   T := TTable(ADataSet);
+  for i := 0 to T.IndexDefs.Count - 1 do
+    if SameText(T.IndexDefs[i].Name, AIndexName) then
+      aF := BDEExpressionFields(T.IndexDefs[i]);   // ANNO, TIPODOC, NUMDOC
+  if (Length(aF) = 0) or (Length(AConditions) > Length(aF)) then
+    Exit;                                   // non e' il nostro caso: comportamento standard (TQuery)
+  for i := 0 to High(AConditions) do
+    if (AConditions[i].Op <> '=') or not SameText(AConditions[i].Field, aF[i]) then
+      Exit;                                 // solo uguaglianze sui primi campi, in ordine
   T.SetRangeStart;
-  for C in AConditions do
-    T.FieldByName(C.Field).AsString := VarToStr(C.Value);
+  Fill(False);
   T.SetRangeEnd;
-  for C in AConditions do
-    T.FieldByName(C.Field).AsString := VarToStr(C.Value);
+  Fill(True);
   T.ApplyRange;
   AHandled := True;
 end;
 ```
+
+Misurato con un gestore così su una tabella da 22.323 righe (`WHERE` sui primi 1, 2 e 3 campi di
+`ANNO+TIPODOC+NUMDOC`): 1317, 449 e 1 riga, sempre uguali al `TQuery`, in 43, 17 e 6 ms contro 177, 120 e 92 ms.
+Vale per campi di testo a larghezza fissa; `#255` come limite alto è stato verificato solo con il language driver di
+quella tabella.
 
 ### Cercare un indice nel proprio codice: `BDEFindIndex`
 

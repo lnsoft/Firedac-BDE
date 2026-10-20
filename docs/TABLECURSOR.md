@@ -139,6 +139,9 @@ it is opened. A descending or expression index is also accepted with a `WHERE` (
 - A **partial** key (only `ANNO`, or `ANNO` and `TIPODOC`) finds **no rows and raises no error**: the BDE builds the
   key from the whole expression with the missing fields empty. So the driver never uses its own `SetRange` on an
   expression index: without `OnBDESetRange` (or with `AHandled := False`) the query goes to the `TQuery`.
+- A partial key **works if you complete it yourself**: start of the range with the missing fields empty, end of the
+  range with the missing fields filled with `#255` for their whole width (measured with `DocT00`: 1317 and 449 rows,
+  the same as the `TQuery`). See the handler below.
 - `SetRange([...])`, `FindKey` and `FindNearest` with arrays are refused by Delphi
   ("Cannot use array of Field values with Expression Indices").
 - Text fields are compared as stored: `NUMDOC` is right-aligned with leading spaces, so the value must be
@@ -154,31 +157,69 @@ functions (`STR(N,5)+X`, `UPPER(A)`), for numeric fields (`+` would be a sum), o
 in `OnBDEIndexNeeded`). `BDEExpressionFields(ADef)` and the `AExpressions` form of `BDEFindIndex` expose the same
 logic.
 
-A handler for the full key only:
+A handler that accepts equalities on the first fields of the index, partial keys included (the driver passes the
+index name and the conditions; `BDEExpressionFields` returns the fields of the expression):
 
 ```pascal
 procedure TForm1.BDESetRange(Sender: TObject; ADataSet: TDataSet; const AIndexName: String;
   const AConditions: TArray<TBDECondition>; var AHandled: Boolean);
 var
   T: TTable;
-  C: TBDECondition;
+  aF: TArray<String>;
+  sV: String;
+  i: Integer;
+
+  function CondValue(const AField: String; out AValue: String): Boolean;
+  var
+    j: Integer;
+  begin
+    Result := False;
+    for j := 0 to High(AConditions) do
+      if SameText(AConditions[j].Field, AField) then begin
+        AValue := VarToStr(AConditions[j].Value);
+        Exit(True);
+      end;
+  end;
+
+  // the key: fields with '=' at their value; the others empty (start) or #255 (end)
+  procedure Fill(AHigh: Boolean);
+  var
+    j: Integer;
+    F: TField;
+  begin
+    for j := 0 to High(aF) do begin
+      F := T.FieldByName(aF[j]);
+      if CondValue(aF[j], sV) then
+        F.AsString := sV
+      else if AHigh then
+        F.AsString := StringOfChar(#255, F.Size);
+    end;
+    T.KeyFieldCount := Length(aF);
+  end;
+
 begin
-  if not SameText(AIndexName, 'NUMDOC') or (Length(AConditions) <> 3) then
-    Exit;                                   // not our case: standard behaviour (TQuery)
-  for C in AConditions do
-    if C.Op <> '=' then
-      Exit;
   T := TTable(ADataSet);
+  for i := 0 to T.IndexDefs.Count - 1 do
+    if SameText(T.IndexDefs[i].Name, AIndexName) then
+      aF := BDEExpressionFields(T.IndexDefs[i]);   // ANNO, TIPODOC, NUMDOC
+  if (Length(aF) = 0) or (Length(AConditions) > Length(aF)) then
+    Exit;                                   // not our case: standard behaviour (TQuery)
+  for i := 0 to High(AConditions) do
+    if (AConditions[i].Op <> '=') or not SameText(AConditions[i].Field, aF[i]) then
+      Exit;                                 // only equalities on the first fields, in order
   T.SetRangeStart;
-  for C in AConditions do
-    T.FieldByName(C.Field).AsString := VarToStr(C.Value);
+  Fill(False);
   T.SetRangeEnd;
-  for C in AConditions do
-    T.FieldByName(C.Field).AsString := VarToStr(C.Value);
+  Fill(True);
   T.ApplyRange;
   AHandled := True;
 end;
 ```
+
+Measured with a handler like this on a table of 22,323 rows (`WHERE` on the first 1, 2 and 3 fields of
+`ANNO+TIPODOC+NUMDOC`): 1317, 449 and 1 rows, always the same as the `TQuery`, in 43, 17 and 6 ms against 177, 120 and
+92 ms. Valid for text fields of fixed width; `#255` as the upper limit was verified only with the language driver of
+that table.
 
 ### Finding an index in your own code: `BDEFindIndex`
 

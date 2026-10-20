@@ -7,6 +7,8 @@
   index and always calls `OnBDESetRange`, so the program can build a partial key. A `WHERE` without `ORDER BY` also
   reaches `OnBDESetRange` when `OnBDEIndexNeeded` is not assigned. New `BDEExpressionFields` and the
   `AExpressions` form of `BDEFindIndex` (`TBDEIndexMatch.IsExpression`). See `docs/TABLECURSOR.md`.
+  A partial key works if the handler completes it (missing fields empty at the start, `#255` at the end): measured on
+  22,323 rows, same rows as the `TQuery`, 4-10 times faster. New test `TestExprDriver` in `BDETest`.
 - Docs: `docs/BDE_4GB_BUG.md` explains the random "Insufficient disk space" error of the BDE (free space near a
   multiple of 4 GB). New `Demos/FixBDE4GbBug.pas`, a Unicode/Win32 port of the 2004 patch unit; with it the error
   disappeared in our tests. Optional, not part of the driver.
