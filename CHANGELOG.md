@@ -1,35 +1,35 @@
 # Changelog
 
-## Unreleased
+## 0.2.0 – 2026-10-20
 
-- With `OnBDESetRange` assigned, a `WHERE` without `ORDER BY` is now served by the `TTable` also when the table only
-  has dBase expression indexes made of text fields joined by `+` (`ANNO+TIPODOC+NUMDOC`): the driver proposes the
-  index and always calls `OnBDESetRange`, so the program can build a partial key. A `WHERE` without `ORDER BY` also
-  reaches `OnBDESetRange` when `OnBDEIndexNeeded` is not assigned. New `BDEExpressionFields` and the
-  `AExpressions` form of `BDEFindIndex` (`TBDEIndexMatch.IsExpression`). See `docs/TABLECURSOR.md`.
-  A partial key works if the handler completes it (missing fields empty at the start, `#255` at the end): measured on
-  22,323 rows, same rows as the `TQuery`, 4-10 times faster. New test `TestExprDriver` in `BDETest`.
-- Docs: `docs/BDE_4GB_BUG.md` explains the random "Insufficient disk space" error of the BDE (free space near a
-  multiple of 4 GB). New `Demos/FixBDE4GbBug.pas`, a Unicode/Win32 port of the 2004 patch unit; with it the error
-  disappeared in our tests. Optional, not part of the driver.
-- Fix: `FetchOptions.RecsMax` / `RecsSkip` (limit and paging) made FireDAC send `SELECT TOP n ...`, which Local SQL
-  rejects ("Invalid use of keyword"). The limit is now applied by FireDAC on the client; with `TableCursor` the
-  rows beyond the limit are not even read.
-- New public functions `BDEFindIndex` (two forms) and `BDEIndexServesOrder` in `FireDAC.Phys.BDEDef`: they find the
-  index for equalities (any order of the fields), one range and the `ORDER BY`, or for a list of fields in any
-  order. The driver uses them for its own proposal: `WHERE A = 1 AND B > 5` now picks the index on `(A, B)` even if
-  one on `(B, A)` comes first, and `ORDER BY A, B WHERE C = 1` is served by an index on `(C, A, B)`.
-- dBase expression indexes (for example `ANNO+TIPODOC+NUMDOC`): the driver never applies its own `SetRange` to them,
-  because a partial key finds no rows without any error (measured). Use `OnBDESetRange` with the full key; see
-  `docs/TABLECURSOR.md`.
-- Faster `FetchOptions.RecsSkip` (paging): the driver skips the rows with the cursor only and tells FireDAC that
-  nothing is left to skip, instead of FireDAC reading and converting every skipped row. 407,585 rows skipped:
-  3,031 ms -> 243 ms (natural order), 4,339 ms -> 1,325 ms (`ORDER BY` on an index). Paging by key
-  (`WHERE key > :last ORDER BY key`) stays at 4 ms. See `docs/TABLECURSOR.md`.
 - New runtime events `OnBDEIndexNeeded` and `OnBDESetRange` (class helpers on `TFDConnection`, with
   `TableCursor=True`): the program can choose the index for `ORDER BY` / `WHERE` on a single table (also `DESC`,
   `WHERE` without `ORDER BY`), set the range itself (text and date conditions included) or reject a query. Without
   the events nothing changes. `WHERE` conditions may now also compare with text literals. See `docs/TABLECURSOR.md`.
+- New public functions `BDEFindIndex` (two forms) and `BDEIndexServesOrder` in `FireDAC.Phys.BDEDef`: they find the
+  index for equalities (any order of the fields), one range and the `ORDER BY`, or for a list of fields in any
+  order. The driver uses them for its own proposal: `WHERE A = 1 AND B > 5` now picks the index on `(A, B)` even if
+  one on `(B, A)` comes first, and `ORDER BY A, B WHERE C = 1` is served by an index on `(C, A, B)`.
+- dBase expression indexes made of text fields joined by `+` (for example `ANNO+TIPODOC+NUMDOC`): a partial key
+  finds no rows and raises no error (measured), so the driver never applies its own `SetRange` to them. With
+  `OnBDESetRange` assigned, a `WHERE` without `ORDER BY` on the first fields of such an index is served by the
+  `TTable`: the driver proposes the index (`Accept = True` in `OnBDEIndexNeeded`) and always calls `OnBDESetRange`.
+  A partial key works if the handler completes it (missing fields empty at the start, `#255` at the end): measured
+  on 22,323 rows, same rows as the `TQuery`, 4-10 times faster. A `WHERE` without `ORDER BY` also reaches
+  `OnBDESetRange` when `OnBDEIndexNeeded` is not assigned. New `BDEExpressionFields` and the `AExpressions` form of
+  `BDEFindIndex` (`TBDEIndexMatch.IsExpression`). See `docs/TABLECURSOR.md`.
+- Fix: `FetchOptions.RecsMax` / `RecsSkip` (limit and paging) made FireDAC send `SELECT TOP n ...`, which Local SQL
+  rejects ("Invalid use of keyword"). The limit is now applied by FireDAC on the client; with `TableCursor` the
+  rows beyond the limit are not even read.
+- Faster `FetchOptions.RecsSkip` (paging): the driver skips the rows with the cursor only and tells FireDAC that
+  nothing is left to skip, instead of FireDAC reading and converting every skipped row. 407,585 rows skipped:
+  3,031 ms -> 243 ms (natural order), 4,339 ms -> 1,325 ms (`ORDER BY` on an index). Paging by key
+  (`WHERE key > :last ORDER BY key`) stays at 4 ms. See `docs/TABLECURSOR.md`.
+- Docs: `docs/BDE_4GB_BUG.md` explains the random "Insufficient disk space" error of the BDE (free space near a
+  multiple of 4 GB). New `Demos/FixBDE4GbBug.pas`, a Unicode/Win32 port of the 2004 patch unit; with it the error
+  disappeared in our tests. Optional, not part of the driver.
+- Tests: `BDETest` has new checks for `BDEFindIndex`, for `RecsMax` / `RecsSkip` and for the expression-index
+  proposal with a real `WHERE` (`TestExprDriver`).
 
 ## 0.1.0 – 2026-10-19
 

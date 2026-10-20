@@ -140,7 +140,7 @@ it is opened. A descending or expression index is also accepted with a `WHERE` (
   key from the whole expression with the missing fields empty. So the driver never uses its own `SetRange` on an
   expression index: without `OnBDESetRange` (or with `AHandled := False`) the query goes to the `TQuery`.
 - A partial key **works if you complete it yourself**: start of the range with the missing fields empty, end of the
-  range with the missing fields filled with `#255` for their whole width (measured with `DocT00`: 1317 and 449 rows,
+  range with the missing fields filled with `#255` for their whole width (measured on a test table of 22,323 rows: 1317 and 449 rows,
   the same as the `TQuery`). See the handler below.
 - `SetRange([...])`, `FindKey` and `FindNearest` with arrays are refused by Delphi
   ("Cannot use array of Field values with Expression Indices").

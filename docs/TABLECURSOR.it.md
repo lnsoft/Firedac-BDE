@@ -143,7 +143,7 @@ Viene accettato anche un indice discendente o espressione con un `WHERE` (l'inte
   proprio `SetRange` su un indice espressione: senza `OnBDESetRange` (o con `AHandled := False`) la query va al
   `TQuery`.
 - Una chiave parziale **funziona se la completi tu**: all'inizio dell'intervallo i campi mancanti vuoti, alla fine
-  riempiti con `#255` per tutta la loro larghezza (misurato con `DocT00`: 1317 e 449 righe, uguali al `TQuery`).
+  riempiti con `#255` per tutta la loro larghezza (misurato su una tabella di prova da 22.323 righe: 1317 e 449 righe, uguali al `TQuery`).
   Vedi il gestore qui sotto.
 - `SetRange([...])`, `FindKey` e `FindNearest` con gli array sono rifiutati da Delphi
   ("Cannot use array of Field values with Expression Indices").
