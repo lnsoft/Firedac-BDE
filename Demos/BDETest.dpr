@@ -1163,6 +1163,39 @@ var
     Q.FetchOptions.RecsMax := -1;
   end;
 
+  procedure CheckSkip(AConn: TFDConnection; const ALabel, ASQL: String);
+  begin
+    Q.Close;
+    Q.Connection := AConn;
+    Q.FetchOptions.RecsMax := 5;   // bastano poche righe: non si legge l'intera tabella
+    Q.FetchOptions.RecsSkip := -1;
+    Q.Open(ASQL);
+    k0 := Q.Fields[0].Value;
+    Q.Next;
+    k1 := Q.Fields[0].Value;
+    Q.Next;
+    k2 := Q.Fields[0].Value;
+    Q.Close;
+    Q.FetchOptions.RecsSkip := 2;
+    try
+      Q.Open(ASQL);
+      if Q.Eof or (Q.Fields[0].Value <> k2) then begin
+        bOk := False;
+        Write('(RecsSkip=2 ', ALabel, ': prima riga diversa dalla terza della lettura normale) ');
+      end
+      else
+        Write('(RecsSkip=2 ', ALabel, ': ok) ');
+    except
+      on E: Exception do begin
+        bOk := False;
+        Write('(RecsSkip=2 ', ALabel, ' NON funziona: ', Copy(E.Message, 1, 70), ') ');
+      end;
+    end;
+    Q.Close;
+    Q.FetchOptions.RecsSkip := -1;
+    Q.FetchOptions.RecsMax := -1;
+  end;
+
 begin
   bOk := True;
   C2 := TFDConnection.Create(nil);
@@ -1178,28 +1211,24 @@ begin
     if KeyField <> '' then
       Try1(C2, 'TableCursor con order by', 'select * from ' + SqlTab + ' order by ' + KeyField);
     // RecsSkip: la prima riga dopo lo skip e' la terza riga della lettura normale
+    // (il driver salta da solo col cursore: se FireDAC saltasse di nuovo si arriverebbe alla quinta)
+    CheckSkip(Conn, 'TQuery', 'select * from ' + SqlTab);
+    CheckSkip(C2, 'TableCursor', 'select * from ' + SqlTab);
+    if KeyField <> '' then
+      CheckSkip(C2, 'TableCursor con order by', 'select * from ' + SqlTab + ' order by ' + KeyField);
+    // skip oltre la fine: nessuna riga e nessun errore
     Q.Connection := C2;
-    Q.FetchOptions.RecsSkip := -1;
-    Q.Open('select * from ' + SqlTab);
-    k0 := Q.Fields[0].Value;
-    Q.Next;
-    k1 := Q.Fields[0].Value;
-    Q.Next;
-    k2 := Q.Fields[0].Value;
-    Q.Close;
-    Q.FetchOptions.RecsSkip := 2;
+    Q.FetchOptions.RecsMax := -1;
+    Q.FetchOptions.RecsSkip := MaxInt div 2;
     try
       Q.Open('select * from ' + SqlTab);
-      if Q.Eof or (Q.Fields[0].Value <> k2) then begin
+      Write('(RecsSkip oltre la fine: ', Q.RecordCount, ' righe) ');
+      if Q.RecordCount <> 0 then
         bOk := False;
-        Write('(RecsSkip=2: prima riga diversa dalla terza della lettura normale) ');
-      end
-      else
-        Write('(RecsSkip=2: ok) ');
     except
       on E: Exception do begin
         bOk := False;
-        Write('(RecsSkip=2 NON funziona: ', Copy(E.Message, 1, 70), ') ');
+        Write('(RecsSkip oltre la fine NON funziona: ', Copy(E.Message, 1, 70), ') ');
       end;
     end;
     Q.Close;
@@ -1328,6 +1357,150 @@ begin
   finally
     T.Free;
     Q.Free;
+  end;
+end;
+
+// Misura (non verifica il driver): costo di FetchOptions.RecsSkip con TableCursor e,
+// su una TTable pura, confronto tra Next ripetuto, MoveBy e RecNo per saltare N righe.
+// Serve a decidere se il driver deve gestire lo skip da solo (MoveBy) invece di far
+// leggere e scartare le righe a FireDAC. Gli skip sono percentuali della tabella
+// (0, 1%, 25%, 90%); il confronto dei valori verifica che si arrivi alla stessa riga.
+procedure TestSkipProbe;
+const
+  C_Max = 50;
+var
+  C2: TFDConnection;
+  Q: TFDQuery;
+  T: TTable;
+  SW: TStopwatch;
+  iTot, i, n: Integer;
+  aSkip: TArray<Integer>;
+  aRefNat, aRefKey: TArray<String>;
+  msN, msM, msR, ms: Int64;
+  vN, vM, vR: String;
+  bOk: Boolean;
+
+  function OpenSkip(const ASQL: String; ASkip: Integer; out AFirst: String): Int64;
+  begin
+    Q.Close;
+    Q.FetchOptions.RecsMax := C_Max;
+    if ASkip > 0 then
+      Q.FetchOptions.RecsSkip := ASkip
+    else
+      Q.FetchOptions.RecsSkip := -1;
+    SW := TStopwatch.StartNew;
+    Q.Open(ASQL);
+    n := 0;
+    AFirst := '';
+    if not Q.Eof then
+      AFirst := Q.Fields[0].AsString;
+    while not Q.Eof do begin
+      Inc(n);
+      Q.Next;
+    end;
+    Result := SW.ElapsedMilliseconds;
+    Q.Close;
+  end;
+
+  // TTable pura: salta aSkip[i] righe in tre modi e confronta la riga raggiunta
+  procedure RawSkip(const ALabel: String; const ARef: TArray<String>);
+  var
+    j, k: Integer;
+  begin
+    for j := 1 to High(aSkip) do begin
+      T.First;
+      SW := TStopwatch.StartNew;
+      for k := 1 to aSkip[j] do
+        T.Next;
+      msN := SW.ElapsedMilliseconds;
+      vN := T.Fields[0].AsString;
+
+      T.First;
+      SW := TStopwatch.StartNew;
+      T.MoveBy(aSkip[j]);
+      msM := SW.ElapsedMilliseconds;
+      vM := T.Fields[0].AsString;
+
+      T.First;
+      try
+        SW := TStopwatch.StartNew;
+        T.RecNo := aSkip[j] + 1;
+        msR := SW.ElapsedMilliseconds;
+        vR := T.Fields[0].AsString;
+      except
+        on E: Exception do begin
+          msR := -1;
+          vR := '(' + Copy(E.Message, 1, 40) + ')';
+        end;
+      end;
+      Writeln('    ', ALabel, ' skip ', aSkip[j], ': Next x N ', msN, ' ms, MoveBy ', msM,
+        ' ms, RecNo ', IfThen(msR < 0, 'non supportato', IntToStr(msR) + ' ms'), ' | stessa riga Next/MoveBy: ',
+        IfThen(vN = vM, 'si', 'NO'), ', RecNo: ', IfThen(vR = vN, 'si', 'no'),
+        ', come FireDAC: ', IfThen(vN = ARef[j], 'si', 'NO (' + vN + ' contro ' + ARef[j] + ')'));
+      if vN <> vM then
+        bOk := False;
+    end;
+  end;
+
+begin
+  bOk := True;
+  C2 := TFDConnection.Create(nil);
+  Q := TFDQuery.Create(nil);
+  T := TTable.Create(nil);
+  try
+    C2.DriverName := 'BDE';
+    C2.LoginPrompt := False;
+    C2.Params.Database := Folder;
+    C2.Params.Values['TableCursor'] := 'True';
+    C2.Open;
+    Q.Connection := C2;
+    T.DatabaseName := Folder;
+    T.TableName := TabName;
+    T.ReadOnly := True;
+    T.Open;
+    iTot := T.RecordCount;
+    T.Close;
+    if iTot < 200 then begin
+      Write('(saltato: servono almeno 200 righe) ');
+      Exit;
+    end;
+    aSkip := [0, iTot div 100, iTot div 4, (iTot * 9) div 10];
+    SetLength(aRefNat, Length(aSkip));
+    SetLength(aRefKey, Length(aSkip));
+    Writeln;
+    Writeln('    righe nella tabella: ', iTot, ', RecsMax=', C_Max);
+
+    // 1) FireDAC + TableCursor, ordine naturale
+    for i := 0 to High(aSkip) do begin
+      ms := OpenSkip('select * from ' + SqlTab, aSkip[i], aRefNat[i]);
+      Writeln('    FireDAC TableCursor, RecsSkip=', aSkip[i], ': ', ms, ' ms (', n, ' righe)');
+    end;
+    // 2) FireDAC + TableCursor, ORDER BY sulla chiave
+    if KeyField <> '' then
+      for i := 0 to High(aSkip) do begin
+        ms := OpenSkip('select * from ' + SqlTab + ' order by ' + KeyField, aSkip[i], aRefKey[i]);
+        Writeln('    FireDAC TableCursor + order by ', KeyField, ', RecsSkip=', aSkip[i], ': ', ms,
+          ' ms (', n, ' righe)');
+      end;
+
+    // 3) TTable pura, ordine naturale
+    T.IndexFieldNames := '';
+    T.Open;
+    RawSkip('TTable naturale  ', aRefNat);
+    T.Close;
+    // 4) TTable pura, sull'indice della chiave
+    if KeyField <> '' then begin
+      T.IndexFieldNames := KeyField;
+      T.Open;
+      RawSkip('TTable su ' + KeyField, aRefKey);
+      T.Close;
+    end;
+    if not bOk then
+      raise Exception.Create('Next e MoveBy arrivano a righe diverse');
+  finally
+    T.Free;
+    Q.Free;
+    C2.Free;
   end;
 end;
 
@@ -1993,6 +2166,7 @@ begin
       if (KeyField <> '') and (TextField <> '') then
         Run('Misura: TTable.Filter contro WHERE del TQuery', TestFilterProbe);
       Run('Diagnostica: RecsMax (limite di righe) con il driver', TestRecsMax);
+      Run('Misura: RecsSkip con TableCursor, Next contro MoveBy contro RecNo', TestSkipProbe);
       if KeyField <> '' then
         Run('Misura ORDER BY: TQuery contro TTable con indice', TestOrderBy);
       if KeyField <> '' then

@@ -128,9 +128,11 @@ type
     FEqIdx: TArray<Integer>;         // indici in FConds delle uguaglianze, per posizione
     FLoIdx, FHiIdx: Integer;         // limite inferiore / superiore (-1 = nessuno)
     FColumnIndex: Integer;
+    FSkipFromSQL: Integer;           // skip dell'escape {LIMIT} letto al Prepare (-1 = nessuno)
     FMeta: TList<TArray<Variant>>;
     FMetaPos: Integer;
     function GetBDEConnection: TFDPhysBDEConnection;
+    procedure SkipRows;
     procedure BindParams(AIndex: Integer);
     procedure BuildMeta;
     procedure AddMetaRow(const AValues: array of Variant);
@@ -1066,9 +1068,33 @@ begin
     FTable.ApplyRange;
 end;
 
+// RecsSkip (e lo skip dell'escape {LIMIT}) applicato dal driver con il solo cursore.
+// In TFDPhysCommand.FetchRowSet FireDAC salta le righe sul client, leggendole e
+// convertendole una a una, solo se loSkip non e' tra FLimitOptions; in quel caso usa
+// FSQLLimitSkip quando e' >= 0 e altrimenti RecsSkip. Qui si salta con Next senza
+// toccare i campi e si imposta FSQLLimitSkip := 0, cosi' FireDAC non salta di nuovo.
+// FSQLLimitSkip viene riportato a -1 solo da Prepare, quindi va riscritto a ogni apertura.
+procedure TFDPhysBDECommand.SkipRows;
+var
+  iSkip: Integer;
+begin
+  if (GetCommandKind <> skSelect) or (FData = nil) then
+    Exit;
+  if FSkipFromSQL >= 0 then
+    iSkip := FSkipFromSQL
+  else
+    iSkip := GetOptions.FetchOptions.RecsSkip;
+  FSQLLimitSkip := 0;
+  while (iSkip > 0) and not FData.Eof do begin
+    FData.Next;
+    Dec(iSkip);
+  end;
+end;
+
 procedure TFDPhysBDECommand.InternalPrepare;
 begin
   FMetaPos := 0;
+  FSkipFromSQL := FSQLLimitSkip;
   if GetMetaInfoKind <> mkNone then begin
     // i metadati sono costruiti in InternalOpen
     Exit;
@@ -1177,6 +1203,7 @@ begin
       FQuery.Open;
     end;
     BuildFields;
+    SkipRows;
     Result := True;
   except
     on E: EDBEngineError do
