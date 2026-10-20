@@ -1754,6 +1754,261 @@ begin
   end;
 end;
 
+type
+  // gestori di prova per un indice espressione di campi di testo (ANNO+TIPODOC+NUMDOC):
+  // OnBDEIndexNeeded registra la proposta del driver, OnBDESetRange costruisce la chiave
+  TExprProbe = class
+  public
+    IdxCalls, RangeCalls, CondCount: Integer;
+    LastProposed, LastIndex: String;
+    LastAcceptIn: Boolean;
+    FNames: TArray<String>;       // campi dell'espressione, nell'ordine dell'indice
+    FSizes: TArray<Integer>;      // larghezza dei campi
+    Mode: Integer;                // 0 non gestisce (TQuery), 1 imposta la chiave con riempimento
+    procedure OnNeeded(Sender: TObject; const ATableName, AFieldNames, ASQL: String;
+      ADescending: Boolean; var AIndexName: String; var AAccept: Boolean);
+    procedure OnRange(Sender: TObject; ADataSet: TDataSet; const AIndexName: String;
+      const AConditions: TArray<TBDECondition>; var AHandled: Boolean);
+  end;
+
+procedure TExprProbe.OnNeeded(Sender: TObject; const ATableName, AFieldNames, ASQL: String;
+  ADescending: Boolean; var AIndexName: String; var AAccept: Boolean);
+begin
+  Inc(IdxCalls);
+  LastAcceptIn := AAccept;
+  LastProposed := AIndexName;
+end;
+
+procedure TExprProbe.OnRange(Sender: TObject; ADataSet: TDataSet; const AIndexName: String;
+  const AConditions: TArray<TBDECondition>; var AHandled: Boolean);
+var
+  T: TTable;
+
+  function CondValue(const AField: String; out AValue: String): Boolean;
+  var
+    j: Integer;
+  begin
+    Result := False;
+    for j := 0 to High(AConditions) do
+      if SameText(AConditions[j].Field, AField) and (AConditions[j].Op = '=') then begin
+        AValue := VarToStr(AConditions[j].Value);
+        Result := True;
+        Exit;
+      end;
+  end;
+
+  // chiave: campi con '=' al loro valore; gli altri vuoti (inizio) o pieni di #255 (fine)
+  procedure Fill(AHigh: Boolean);
+  var
+    j: Integer;
+    sV: String;
+  begin
+    for j := 0 to High(FNames) do
+      if CondValue(FNames[j], sV) then
+        T.FieldByName(FNames[j]).AsString := sV
+      else if AHigh then
+        T.FieldByName(FNames[j]).AsString := StringOfChar(#255, FSizes[j]);
+    T.KeyFieldCount := Length(FNames);
+  end;
+
+begin
+  Inc(RangeCalls);
+  LastIndex := AIndexName;
+  CondCount := Length(AConditions);
+  if Mode = 0 then
+    Exit;
+  T := TTable(ADataSet);
+  T.SetRangeStart;
+  Fill(False);
+  T.SetRangeEnd;
+  Fill(True);
+  T.ApplyRange;
+  AHandled := True;
+end;
+
+// Proposta del driver per un indice ESPRESSIONE di soli campi di testo, con un WHERE reale:
+//  1) solo OnBDESetRange: il WHERE sui primi k campi dell'indice va alla TTable, l'evento
+//     riceve l'indice e le k condizioni (controlli)
+//  2) l'evento non gestisce: stesso risultato del TQuery (controllo)
+//  3) con anche OnBDEIndexNeeded: la proposta arriva con Accept = True (controllo)
+// Con la chiave completa le righe devono essere quelle del TQuery (controllo); con una chiave
+// parziale il gestore completa la chiave (campi vuoti all'inizio, #255 alla fine) e il
+// risultato e' una MISURA, non un controllo. Senza indice del genere il test e' saltato.
+procedure TestExprDriver;
+var
+  T: TTable;
+  C2: TFDConnection;
+  QA, QB: TFDQuery;
+  P: TExprProbe;
+  aF, aVal: TArray<String>;
+  sIdx, sSql, sOut: String;
+  i, j, k, n, m0, nA, nB: Integer;
+  bOk, bTab: Boolean;
+  msA, msB: Int64;
+
+  // righe di AQ per il WHERE sui primi AK campi (uguaglianze)
+  function CountRows(AQ: TFDQuery; AK: Integer; out AMs: Int64): Integer;
+  var
+    jj: Integer;
+    SW: TStopwatch;
+  begin
+    AQ.Close;
+    sSql := 'select * from ' + SqlTab + ' where ';
+    for jj := 0 to AK - 1 do begin
+      if jj > 0 then
+        sSql := sSql + ' and ';
+      sSql := sSql + aF[jj] + ' = :p' + IntToStr(jj);
+    end;
+    AQ.SQL.Text := sSql;
+    AQ.Unprepare;           // la scelta dell'indice avviene in Prepare
+    for jj := 0 to AK - 1 do
+      AQ.ParamByName('p' + IntToStr(jj)).AsString := aVal[jj];
+    SW := TStopwatch.StartNew;
+    AQ.Open;
+    Result := 0;
+    while not AQ.Eof do begin
+      Inc(Result);
+      AQ.Next;
+    end;
+    AMs := SW.ElapsedMilliseconds;
+    AQ.Close;
+  end;
+
+begin
+  P := TExprProbe.Create;
+  T := TTable.Create(nil);
+  try
+    // 1) primo indice espressione fatto di soli campi di testo, e una riga campione
+    sIdx := '';
+    T.DatabaseName := Folder;
+    T.TableName := TabName;
+    T.ReadOnly := True;
+    T.IndexDefs.Update;
+    T.FieldDefs.Update;
+    for i := 0 to T.IndexDefs.Count - 1 do begin
+      aF := BDEExpressionFields(T.IndexDefs[i]);
+      if Length(aF) < 2 then
+        Continue;
+      bOk := True;
+      SetLength(P.FSizes, Length(aF));
+      for j := 0 to High(aF) do begin
+        k := T.FieldDefs.IndexOf(aF[j]);
+        if (k < 0) or not (T.FieldDefs[k].DataType in [ftString, ftFixedChar, ftWideString]) then
+          bOk := False
+        else
+          P.FSizes[j] := T.FieldDefs[k].Size;
+      end;
+      if bOk then begin
+        if T.IndexDefs[i].Name = '' then
+          sIdx := S_BDE_PrimaryIndex
+        else
+          sIdx := T.IndexDefs[i].Name;
+        Break;
+      end;
+    end;
+    if sIdx = '' then begin
+      Write('(nessun indice espressione di soli campi di testo: saltato) ');
+      Exit;
+    end;
+    P.FNames := aF;
+    n := Length(aF);
+    T.Open;
+    if T.RecordCount > 1 then
+      T.MoveBy(T.RecordCount div 2);
+    SetLength(aVal, n);
+    bOk := False;
+    for k := 1 to 1000 do begin
+      bOk := True;
+      for j := 0 to n - 1 do begin
+        aVal[j] := TrimRight(T.FieldByName(aF[j]).AsString);
+        if Trim(aVal[j]) = '' then
+          bOk := False;
+      end;
+      if bOk or T.Eof then
+        Break;
+      T.Next;
+    end;
+    T.Close;
+    if not bOk then begin
+      Write('(nessuna riga con tutti i campi dell''indice valorizzati: saltato) ');
+      Exit;
+    end;
+    sOut := '(indice ' + sIdx + ' = ' + string.Join('+', aF) + ') ';
+
+    C2 := TFDConnection.Create(nil);
+    QA := TFDQuery.Create(nil);
+    QB := TFDQuery.Create(nil);
+    try
+      C2.DriverName := 'BDE';
+      C2.LoginPrompt := False;
+      C2.Params.Database := Folder;
+      C2.Params.Values['TableCursor'] := 'True';
+      C2.Open;
+      QA.Connection := Conn;           // senza TableCursor: il riferimento
+      QB.Connection := C2;
+
+      // 1) solo OnBDESetRange, nessuna proposta da parte del programma
+      C2.OnBDESetRange := P.OnRange;
+      P.Mode := 1;
+      for k := 1 to n do begin
+        P.RangeCalls := 0;
+        nA := CountRows(QA, k, msA);
+        m0 := BDEStatTableCursorOpens;
+        nB := CountRows(QB, k, msB);
+        bTab := BDEStatTableCursorOpens > m0;
+        if not bTab then
+          raise Exception.CreateFmt('%d campi: la TTable non e'' stata usata (nessuna proposta)', [k]);
+        if (P.RangeCalls <> 1) or (P.CondCount <> k) or not SameText(P.LastIndex, sIdx) then
+          raise Exception.CreateFmt('%d campi: OnBDESetRange chiamato %d volte, %d condizioni, indice "%s"',
+            [k, P.RangeCalls, P.CondCount, P.LastIndex]);
+        sOut := sOut + '(' + IntToStr(k) + ' campi: ' + IntToStr(nB) + ' righe, TTable ' +
+          IntToStr(msB) + ' ms, TQuery ' + IntToStr(msA) + ' ms';
+        if nA = nB then
+          sOut := sOut + ', = TQuery) '
+        else if k = n then
+          raise Exception.CreateFmt('chiave completa: %d righe contro %d del TQuery', [nB, nA])
+        else
+          sOut := sOut + ', MISURA: DIVERSO dal TQuery (' + IntToStr(nA) + ')) ';
+      end;
+
+      // 2) l'evento non gestisce: stesso risultato del TQuery
+      P.Mode := 0;
+      P.RangeCalls := 0;
+      nA := CountRows(QA, n, msA);
+      m0 := BDEStatTableCursorOpens;
+      nB := CountRows(QB, n, msB);
+      if (BDEStatTableCursorOpens > m0) or (P.RangeCalls <> 1) or (nA <> nB) then
+        raise Exception.CreateFmt('non gestito: TTable %s, chiamate %d, righe %d / %d',
+          [BoolToStr(BDEStatTableCursorOpens > m0, True), P.RangeCalls, nB, nA]);
+      sOut := sOut + '(non gestito: TQuery, ' + IntToStr(nB) + ' righe) ';
+
+      // 3) con anche OnBDEIndexNeeded: la proposta arriva con Accept = True
+      C2.OnBDEIndexNeeded := P.OnNeeded;
+      P.Mode := 1;
+      P.IdxCalls := 0;
+      P.RangeCalls := 0;
+      m0 := BDEStatTableCursorOpens;
+      nB := CountRows(QB, 1, msB);
+      if (P.IdxCalls <> 1) or not P.LastAcceptIn or not SameText(P.LastProposed, sIdx) or
+         (BDEStatTableCursorOpens <= m0) or (P.RangeCalls <> 1) then
+        raise Exception.CreateFmt('con OnBDEIndexNeeded: chiamate %d, Accept %s, proposta "%s", ' +
+          'TTable %s, OnBDESetRange %d', [P.IdxCalls, BoolToStr(P.LastAcceptIn, True), P.LastProposed,
+          BoolToStr(BDEStatTableCursorOpens > m0, True), P.RangeCalls]);
+      sOut := sOut + '(proposta "' + P.LastProposed + '" con Accept = True) ';
+    finally
+      C2.OnBDEIndexNeeded := nil;
+      C2.OnBDESetRange := nil;
+      QB.Free;
+      QA.Free;
+      C2.Free;
+    end;
+    Write(sOut);
+  finally
+    T.Free;
+    P.Free;
+  end;
+end;
+
 // Misura (non verifica il driver): costo di FetchOptions.RecsSkip con TableCursor e,
 // su una TTable pura, confronto tra Next ripetuto, MoveBy e RecNo per saltare N righe.
 // Serve a decidere se il driver deve gestire lo skip da solo (MoveBy) invece di far
@@ -2563,6 +2818,7 @@ begin
       Run('Diagnostica: RecsMax (limite di righe) con il driver', TestRecsMax);
       Run('Misura: RecsSkip con TableCursor, Next contro MoveBy contro RecNo', TestSkipProbe);
       Run('Misura: indici espressione (campi uniti da +) con SetRange / FindNearest', TestExprIndexProbe);
+      Run('Indice espressione: proposta del driver e OnBDESetRange (WHERE reale)', TestExprDriver);
       if KeyField <> '' then
         Run('Misura ORDER BY: TQuery contro TTable con indice', TestOrderBy);
       if KeyField <> '' then
