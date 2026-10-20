@@ -158,7 +158,26 @@ that costs depends on the cursor (dBase table of 452,873 rows, `RecsMax = 50`):
 | `... order by <indexed field>` with `TableCursor=True` | 4 ms |
 
 So for lists and grids on large tables, `TableCursor=True` with `RecsMax` (or `fmOnDemand` fetching) shows the first
-rows at once. `RecsSkip` works too, but skipping reads the skipped rows.
+rows at once.
+
+`RecsSkip` (paging) is applied by the driver with the cursor only: it moves over the skipped rows without reading
+their fields, and tells FireDAC that nothing is left to skip. Same table, 50 rows after the skip:
+
+| Rows skipped | natural order | `order by` indexed field | before (FireDAC skipping) |
+|--------------|---------------|--------------------------|---------------------------|
+| 4,528        | 4 ms          | 15 ms                    | 32 ms / 45 ms             |
+| 113,218      | 70 ms         | 369 ms                   | 824 ms / 1,189 ms         |
+| 407,585      | 243 ms        | 1,325 ms                 | 3,031 ms / 4,339 ms       |
+
+The cost still grows with the number of rows skipped, because the BDE steps over them one by one (`MoveBy` is only
+5-10% faster than `Next`; on an index the steps are slower). For deep paging, **page by key** instead: ask for the
+rows after the last one shown, with a unique key field, and no skip is needed:
+
+```sql
+select * from DETAIL where KEYFIELD > :last order by KEYFIELD
+```
+
+with `RecsMax = 50` this takes 4 ms at any position, because the `TTable` goes straight to the key with `SetRange`.
 
 ## Seeing other users' changes
 

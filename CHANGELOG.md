@@ -5,6 +5,10 @@
 - Fix: `FetchOptions.RecsMax` / `RecsSkip` (limit and paging) made FireDAC send `SELECT TOP n ...`, which Local SQL
   rejects ("Invalid use of keyword"). The limit is now applied by FireDAC on the client; with `TableCursor` the
   rows beyond the limit are not even read.
+- Faster `FetchOptions.RecsSkip` (paging): the driver skips the rows with the cursor only and tells FireDAC that
+  nothing is left to skip, instead of FireDAC reading and converting every skipped row. 407,585 rows skipped:
+  3,031 ms -> 243 ms (natural order), 4,339 ms -> 1,325 ms (`ORDER BY` on an index). Paging by key
+  (`WHERE key > :last ORDER BY key`) stays at 4 ms. See `docs/TABLECURSOR.md`.
 - New runtime events `OnBDEIndexNeeded` and `OnBDESetRange` (class helpers on `TFDConnection`, with
   `TableCursor=True`): the program can choose the index for `ORDER BY` / `WHERE` on a single table (also `DESC`,
   `WHERE` without `ORDER BY`), set the range itself (text and date conditions included) or reject a query. Without

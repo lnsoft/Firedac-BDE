@@ -160,7 +160,26 @@ Il costo dipende dal cursore (tabella dBase da 452.873 righe, `RecsMax = 50`):
 | `... order by <campo indicizzato>` con `TableCursor=True` | 4 ms |
 
 Quindi per elenchi e griglie su tabelle grandi, `TableCursor=True` con `RecsMax` (o il fetch `fmOnDemand`) mostra
-subito le prime righe. Anche `RecsSkip` funziona, ma saltare le righe significa leggerle.
+subito le prime righe.
+
+`RecsSkip` (paginazione) lo applica il driver con il solo cursore: scorre le righe da saltare senza leggerne i
+campi e dice a FireDAC che non resta niente da saltare. Stessa tabella, 50 righe dopo lo skip:
+
+| Righe saltate | ordine naturale | `order by` campo indicizzato | prima (skip fatto da FireDAC) |
+|---------------|-----------------|------------------------------|-------------------------------|
+| 4.528         | 4 ms            | 15 ms                        | 32 ms / 45 ms                 |
+| 113.218       | 70 ms           | 369 ms                       | 824 ms / 1.189 ms             |
+| 407.585       | 243 ms          | 1.325 ms                     | 3.031 ms / 4.339 ms           |
+
+Il costo cresce ancora con le righe saltate, perché il BDE le scorre una per una (`MoveBy` è solo il 5-10% più
+veloce di `Next`; su un indice i passi sono più lenti). Per la paginazione in profondità conviene **paginare per
+chiave**: si chiedono le righe dopo l'ultima mostrata, con un campo chiave univoco, e non serve nessuno skip:
+
+```sql
+select * from DETAIL where CAMPOCHIAVE > :ultima order by CAMPOCHIAVE
+```
+
+con `RecsMax = 50` impiega 4 ms in qualunque posizione, perché la `TTable` va direttamente alla chiave con `SetRange`.
 
 ## Vedere le modifiche degli altri utenti
 
